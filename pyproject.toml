@@ -66,6 +66,7 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 markers = ["e2e: needs docker compose stack", "slow: pauses containers"]
 addopts = "-m 'not e2e'"
 
