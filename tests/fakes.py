@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 from subscriptions_service.domain.enums import EventType
 from subscriptions_service.domain.events import EventEnvelope
-from subscriptions_service.services.ports import PublisherUnavailable
+from subscriptions_service.services.ports import OutgoingNotification, PublisherUnavailable
 
 
 class FakeClock:
@@ -47,3 +47,18 @@ class UnavailablePublisher:
     async def publish(self, envelope: EventEnvelope) -> None:
         self.calls += 1
         raise PublisherUnavailable("broker unreachable")
+
+
+class RecordingSender:
+    """Records sent notifications; raises `error` (if set) instead of sending."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.sent: list[OutgoingNotification] = []
+        self.attempts = 0
+
+    async def send(self, message: OutgoingNotification) -> None:
+        self.attempts += 1
+        if self.error is not None:
+            raise self.error
+        self.sent.append(message)

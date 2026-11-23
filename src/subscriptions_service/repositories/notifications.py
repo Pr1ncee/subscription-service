@@ -67,6 +67,9 @@ class NotificationRepository:
         )
         return list(await self._session.scalars(stmt))
 
+    async def get(self, notification_id: uuid.UUID) -> NotificationRow | None:
+        return await self._session.get(NotificationRow, notification_id)
+
     async def get_for_update(self, notification_id: uuid.UUID) -> NotificationRow | None:
         stmt = (
             select(NotificationRow)
