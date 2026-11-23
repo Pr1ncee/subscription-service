@@ -96,7 +96,7 @@ All three processes are entrypoints of one Python package and one Docker image.
 4. **Consumers**: each handler opens a DB tx, `INSERT INTO processed_events(consumer, event_id) ON CONFLICT DO NOTHING`; if no row inserted → ack and skip; else apply side effects and commit; ack after commit. Unhandled error → nack; quorum queue `x-delivery-limit` (default 5) then dead-letter to `events.dlq`.
 5. **Ordering**: not guaranteed across relay instances; consumers do not rely on it (extension and notification creation are per-event idempotent and commutative enough — see 7.3).
 
-### 5.2 RabbitMQ topology (declared by consumers app on startup)
+### 5.2 RabbitMQ topology (declared idempotently by both worker and consumers on startup — so events published before any consumer ran are routed, not dropped)
 
 - Exchange `events` (topic, durable). DLX `events.dlx` (fanout) → queue `events.dlq`.
 - Queues (quorum, durable, `x-delivery-limit=5`, DLX `events.dlx`):
@@ -212,16 +212,16 @@ src/subscriptions_service/
   db/ (engine, session, models.py, migrations/)
   domain/                  # enums, small pure functions (reminder schedule calc, extension calc)
   repositories/            # subscriptions, notifications, payments, outbox, inbox
-  services/                # use cases; own the transaction (unit of work)
-  api/ (app.py, routers/, schemas.py, errors.py)
-  worker/ (main.py, relay.py, scheduler.py)
-  consumers/ (app.py, handlers.py, topology.py)
-  notifications/sender.py  # NotificationSender protocol + LoggingSender
+  services/                # use cases; own the transaction (UoW); ports.py = Protocols (Clock, EventPublisher, NotificationSender)
+  adapters/                # SystemClock, LoggingSender, RabbitPublisher, rabbit_topology
+  api/ (app.py, deps.py, routers/, schemas.py, errors.py)   # deps.py = composition root
+  worker/ (main.py, loop.py)                                # main.py = composition root
+  consumers/ (app.py, handlers.py)                          # app.py = composition root
 tests/ unit/ integration/ e2e/
 docker-compose.yml, Dockerfile, pyproject.toml (uv), alembic.ini, README.md, CLAUDE.md
 ```
 
-Dependency rule: `api/worker/consumers → services → repositories → db.models`; `domain` depends on nothing.
+Dependency rule: `api/worker/consumers → adapters → services → repositories → db → domain`; `domain` depends on nothing. Enforced by import-linter contracts in `pyproject.toml`.
 
 ## 9. Tooling (builder's calls already made)
 Python 3.12, `uv`, FastAPI, FastStream[rabbit], SQLAlchemy 2.0 async + asyncpg, Alembic,
