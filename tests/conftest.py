@@ -4,10 +4,12 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from alembic import command
+from faststream.rabbit import Channel, RabbitBroker
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from testcontainers.community.postgres import PostgresContainer
+from testcontainers.community.rabbitmq import RabbitMqContainer
 
 from subscriptions_service.api.app import create_app
 from subscriptions_service.api.deps import get_clock, get_session_factory
@@ -20,6 +22,9 @@ from tests.fakes import FakeClock
 from tests.support import alembic_config
 
 TABLES = "subscriptions, notifications, payments, outbox, processed_events"
+# Same exact tag as docker-compose: delivery-limit semantics changed in RabbitMQ 4.3.
+RABBITMQ_IMAGE = "rabbitmq:4.3.8-management-alpine"
+RABBITMQ_MANAGEMENT_PORT = 15672
 
 
 @pytest.fixture(scope="session")
@@ -76,3 +81,39 @@ async def api_client(
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
+
+
+@pytest.fixture(scope="session")
+def rabbit_container() -> Iterator[RabbitMqContainer]:
+    with RabbitMqContainer(RABBITMQ_IMAGE).with_exposed_ports(RABBITMQ_MANAGEMENT_PORT) as rabbit:
+        yield rabbit
+
+
+@pytest.fixture(scope="session")
+def rabbit_url(rabbit_container: RabbitMqContainer) -> str:
+    host = rabbit_container.get_container_host_ip()
+    port = rabbit_container.get_exposed_port(rabbit_container.port)
+    return f"amqp://guest:guest@{host}:{port}/"
+
+
+@pytest.fixture
+def rabbit_management(rabbit_container: RabbitMqContainer) -> str:
+    host = rabbit_container.get_container_host_ip()
+    port = rabbit_container.get_exposed_port(RABBITMQ_MANAGEMENT_PORT)
+    return f"http://{host}:{port}/api"
+
+
+async def _delete_all_queues(management_url: str) -> None:
+    async with httpx.AsyncClient(auth=("guest", "guest"), timeout=10) as client:
+        for queue in (await client.get(f"{management_url}/queues/%2F")).json():
+            await client.delete(f"{management_url}/queues/%2F/{queue['name']}")
+
+
+@pytest.fixture
+async def rabbit_broker(rabbit_url: str, rabbit_management: str) -> AsyncIterator[RabbitBroker]:
+    broker = RabbitBroker(rabbit_url, default_channel=Channel(on_return_raises=True))
+    await broker.connect()
+    yield broker
+    await broker.stop()
+    # Tests declare queues with different x-delivery-limit values; drop them so they don't collide.
+    await _delete_all_queues(rabbit_management)
