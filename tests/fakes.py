@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 
 from subscriptions_service.domain.enums import EventType
 from subscriptions_service.domain.events import EventEnvelope
+from subscriptions_service.services.ports import PublisherUnavailable
 
 
 class FakeClock:
@@ -35,3 +36,14 @@ class FailingPublisher:
         if self._fail_types is None or envelope.event_type in self._fail_types:
             raise RuntimeError(self._error)
         self.published.append(envelope)
+
+
+class UnavailablePublisher:
+    """Simulates a broker that cannot be reached: every publish raises PublisherUnavailable."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def publish(self, envelope: EventEnvelope) -> None:
+        self.calls += 1
+        raise PublisherUnavailable("broker unreachable")

@@ -14,6 +14,7 @@ from subscriptions_service.adapters.rabbit_topology import (
 )
 from subscriptions_service.domain.enums import EventType
 from subscriptions_service.domain.events import EventEnvelope
+from subscriptions_service.services.ports import PublisherUnavailable
 
 NOW = datetime(2026, 1, 1, 12, tzinfo=UTC)
 
@@ -95,7 +96,7 @@ async def test_publish_recovers_after_broker_pause(
     env = EventEnvelope.new(EventType.PAYMENT_SUCCEEDED, {"payment_id": "p1"}, NOW)
     rabbit_container.get_wrapped_container().pause()
     try:
-        with pytest.raises(TimeoutError):
+        with pytest.raises(PublisherUnavailable, match="not confirmed within 2"):
             await pub.publish(env)
     finally:
         rabbit_container.get_wrapped_container().unpause()

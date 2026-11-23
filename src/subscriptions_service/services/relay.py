@@ -1,10 +1,11 @@
 import logging
 from datetime import timedelta
 
+from subscriptions_service.db.tables import OutboxRow
 from subscriptions_service.domain.enums import EventType
 from subscriptions_service.domain.events import EventEnvelope
-from subscriptions_service.repositories.uow import UnitOfWorkFactory
-from subscriptions_service.services.ports import Clock, EventPublisher
+from subscriptions_service.repositories.uow import UnitOfWork, UnitOfWorkFactory
+from subscriptions_service.services.ports import Clock, EventPublisher, PublisherUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -54,24 +55,31 @@ class OutboxRelay:
                         payload=row.payload,
                     )
                     await self._publisher.publish(envelope)
+                except PublisherUnavailable as e:
+                    # The broker is down or hung: every further publish would wait a full
+                    # timeout too. Stop here; untried rows stay pending, untouched.
+                    await self._mark_failed(uow, row, e)
+                    break
                 except Exception as e:
-                    attempts = row.attempts + 1
-                    next_attempt_at = self._clock.now() + backoff_delay(
-                        attempts, self._max_backoff_s
-                    )
-                    await uow.outbox.mark_failed(
-                        row, f"{type(e).__name__}: {e}"[:_MAX_ERROR_LEN], next_attempt_at
-                    )
-                    logger.warning(
-                        "outbox publish failed",
-                        extra={
-                            "event_id": str(row.id),
-                            "event_type": row.event_type,
-                            "attempts": attempts,
-                            "error": str(e),
-                        },
-                    )
+                    # A per-message failure (unroutable, nacked, malformed row): skip it.
+                    await self._mark_failed(uow, row, e)
                     continue
                 await uow.outbox.mark_published(row, self._clock.now())
                 published += 1
         return published
+
+    async def _mark_failed(self, uow: UnitOfWork, row: OutboxRow, error: Exception) -> None:
+        attempts = row.attempts + 1
+        next_attempt_at = self._clock.now() + backoff_delay(attempts, self._max_backoff_s)
+        await uow.outbox.mark_failed(
+            row, f"{type(error).__name__}: {error}"[:_MAX_ERROR_LEN], next_attempt_at
+        )
+        logger.warning(
+            "outbox publish failed",
+            extra={
+                "event_id": str(row.id),
+                "event_type": row.event_type,
+                "attempts": attempts,
+                "error": str(error),
+            },
+        )

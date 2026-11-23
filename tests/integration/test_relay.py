@@ -12,7 +12,7 @@ from subscriptions_service.services.payments import PaymentService
 from subscriptions_service.services.ports import EventPublisher
 from subscriptions_service.services.relay import OutboxRelay
 from tests.factories import CMD
-from tests.fakes import FailingPublisher, FakeClock, RecordingPublisher
+from tests.fakes import FailingPublisher, FakeClock, RecordingPublisher, UnavailablePublisher
 
 RelayFactory = Callable[[EventPublisher], OutboxRelay]
 
@@ -121,3 +121,16 @@ async def test_commit_failure_after_publish_republishes_same_event_id(
     assert pub.published[0].event_id == pub.published[1].event_id == ev.event_id
     assert pub.published[0] == pub.published[1]  # identical envelope (same occurred_at, payload)
     assert (await psvc.get_status(pay.view.payment_id)).event.published is True
+
+
+async def test_unavailable_publisher_stops_the_batch(
+    relay_factory: RelayFactory, psvc: PaymentService
+) -> None:
+    # A broker that is down/hung must cost one publish timeout per batch, not batch_size of them.
+    pays = [await psvc.record(replace(CMD, provider_payment=f"pp-{i}")) for i in range(3)]
+    pub = UnavailablePublisher()
+    assert await relay_factory(pub).run_once() == 0
+    assert pub.calls == 1
+    events = [(await psvc.get_status(p.view.payment_id)).event for p in pays]
+    assert [e.attempts for e in events] == [1, 0, 0]  # only the tried row is marked failed
+    assert events[0].last_error is not None and "broker unreachable" in events[0].last_error
