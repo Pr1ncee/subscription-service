@@ -29,7 +29,7 @@ Stack requested by the task: FastAPI, FastStream, asyncio, PostgreSQL, RabbitMQ.
 - Real payment-provider integration, currency conversion, refunds.
 - Real notification channels (email/SMS/push) — a pluggable `NotificationSender` with a logging implementation.
 - Exactly-once delivery (we provide at-least-once + idempotent consumers).
-- Metrics/tracing stack, CI pipeline, k8s manifests (mentioned as future work).
+- Metrics/tracing stack, CD (registry publishing, deployment environments), k8s manifests (mentioned as future work). CI **is** in scope: GitHub Actions running lint, types, tests, image build and a compose smoke test.
 
 **Anti-goals** (failure even if "it works")
 - A payment committed while its event is lost — or an event published for a payment that rolled back.
@@ -226,7 +226,8 @@ Dependency rule: `api/worker/consumers → adapters → services → repositorie
 ## 9. Tooling (builder's calls already made)
 Python 3.12, `uv`, FastAPI, FastStream[rabbit], SQLAlchemy 2.0 async + asyncpg, Alembic,
 Pydantic v2 + pydantic-settings, pytest + pytest-asyncio + testcontainers (Postgres, RabbitMQ),
-httpx `AsyncClient`, ruff, mypy (strict on `src/`), structured logging via stdlib `logging` JSON formatter.
+httpx `AsyncClient`, black (formatter), ruff (linter only), mypy (strict on `src/`), import-linter, pre-commit, `make` targets shared by local dev and CI, structured logging via stdlib `logging` JSON formatter.
+Delivery tooling: multi-stage non-root Docker image (pinned bases), docker compose with resource limits, GitHub Actions CI (`quality` / `test` / `docker` jobs), hadolint, actionlint, pip-audit, Dependabot.
 
 ## 10. Testing strategy
 - **Unit**: reminder-schedule calculation, extension calculation, envelope serialization.

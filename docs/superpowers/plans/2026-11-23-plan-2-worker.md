@@ -170,5 +170,5 @@ async def test_publish_recovers_after_broker_pause(rabbit_broker, rabbit_contain
 - [ ] **Step 2: Run — expect FAIL** — `uv run pytest tests/unit/test_loop.py tests/integration/test_rabbit_publisher.py -v`
 - [ ] **Step 3: Implement topology, publisher, loop, worker main.** Check against the installed FastStream version that unroutable `mandatory` returns raise. If the broker option is named differently (e.g. `on_return_raises`), set it in `run_worker` and in the `rabbit_broker` fixture.
 - [ ] **Step 4: Run — expect PASS** (the `slow` test included: `uv run pytest -m "slow or not slow" tests/integration/test_rabbit_publisher.py -v`)
-- [ ] **Step 5: Gates** — `uv run ruff check . && uv run mypy && uv run lint-imports`
+- [ ] **Step 5: Gates** — `make lint typecheck`
 - [ ] **Step 6: Commit** — `feat(worker): add RabbitMQ publisher, topology and worker process`

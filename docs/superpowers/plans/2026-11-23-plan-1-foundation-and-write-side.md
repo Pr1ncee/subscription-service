@@ -6,7 +6,7 @@
 
 **Architecture:** Pragmatic layers `api → services → repositories → db → domain`, enforced mechanically by import-linter. Services own the transaction through an async `UnitOfWork` context manager; ORM rows never leave the services layer (services return frozen dataclass DTOs, the API maps them to Pydantic schemas). Time and other side effects enter through `Protocol` ports injected at a single composition root (`api/deps.py`).
 
-**Tech Stack:** Python 3.12, uv, FastAPI (`fastapi[standard]`), SQLAlchemy 2.0 async + asyncpg, Alembic, Pydantic v2 + pydantic-settings, pytest + pytest-asyncio + testcontainers, httpx, ruff, mypy, import-linter.
+**Tech Stack:** Python 3.12, uv, FastAPI (`fastapi[standard]`), SQLAlchemy 2.0 async + asyncpg, Alembic, Pydantic v2 + pydantic-settings, pytest + pytest-asyncio + pytest-cov + testcontainers, httpx, black, ruff, mypy, import-linter, pre-commit, GNU make.
 
 **Spec:** `docs/superpowers/specs/2026-11-23-subscription-payments-design.md`
 
@@ -25,6 +25,7 @@
 - The API process never talks to RabbitMQ; `/health/ready` checks only the DB.
 - Defaults: `RELAY_POLL_INTERVAL_S=0.5`, `RELAY_BATCH_SIZE=100`, `SCHEDULER_POLL_INTERVAL_S=1.0`, `SCHEDULER_BATCH_SIZE=100`, `RELAY_MAX_BACKOFF_S=60`, `CONSUMER_DELIVERY_LIMIT=5`, `PUBLISH_TIMEOUT_S=5.0`, `LOG_LEVEL=INFO`.
 - Commits: Conventional Commits, **no** `Co-Authored-By`/AI trailers; never `git push` (user rule).
+- Quality gates (identical locally, in pre-commit, and in CI): **black** formats (line-length `100`, target `py312`). **ruff** lints only, with `ruff format` deliberately unused so two formatters never fight and `E501` ignored because black owns line length. **mypy** runs `strict` on `src/`, and **import-linter** enforces the layer contracts. Everything is invoked through `make` targets: `make format`, `make lint`, `make typecheck`, `make test`, `make check` (= lint + typecheck + test).
 
 ### Conventions from the skills the requester named
 
@@ -70,7 +71,7 @@ tests/
 ### Task 1: Project scaffold & quality gates
 
 **Files:**
-- Create: `pyproject.toml`, `.python-version`, `src/subscriptions_service/{__init__,config,logs}.py`, empty `__init__.py` in `domain/ db/ repositories/ services/ adapters/ api/ api/routers/ worker/ consumers/`
+- Create: `pyproject.toml`, `.python-version`, `Makefile`, `.pre-commit-config.yaml`, `src/subscriptions_service/{__init__,config,logs}.py`, empty `__init__.py` in `domain/ db/ repositories/ services/ adapters/ api/ api/routers/ worker/ consumers/`
 - Modify: `.gitignore` (add `.pytest_cache/ .mypy_cache/ .ruff_cache/ dist/`)
 - Test: `tests/unit/test_config.py`, `tests/test_architecture.py`
 
@@ -82,13 +83,27 @@ tests/
 ```bash
 uv init --package --name subscriptions-service --python 3.12 --vcs none .
 uv add "fastapi[standard]" "faststream[rabbit]" "sqlalchemy[asyncio]" asyncpg alembic pydantic-settings
-uv add --dev pytest pytest-asyncio "testcontainers[postgres,rabbitmq]" httpx ruff mypy import-linter
+uv add --dev pytest pytest-asyncio pytest-cov "testcontainers[postgres,rabbitmq]" httpx black ruff mypy import-linter pre-commit
 ```
 
 Rename the generated package dir to `src/subscriptions_service`. In `pyproject.toml` add:
 - `[tool.fastapi] entrypoint = "subscriptions_service.api.app:app"`
-- `[tool.ruff] line-length = 100`, `lint.select = ["E","F","I","N","UP","B","ASYNC","S","RUF"]`, per-file-ignore `S101` for `tests/**`
-- `[tool.mypy] strict = true`, `files = ["src"]`
+- `[tool.black] line-length = 100`, `target-version = ["py312"]`
+- `[tool.ruff] line-length = 100`, `target-version = "py312"`, `lint.select = ["E","F","I","N","UP","B","ASYNC","S","RUF"]`, `lint.ignore = ["E501"]`, per-file-ignore `S101` for `tests/**` (the `I` rules are compatible with black's import formatting)
+- `[tool.mypy] strict = true`, `files = ["src"]`, `plugins = ["pydantic.mypy"]`
+- `[tool.coverage.run] source = ["subscriptions_service"]`, `branch = true`; `[tool.coverage.report] fail_under = 85`, `show_missing = true`
+
+`Makefile` (each target is a thin wrapper over `uv run`, `.PHONY` on all):
+
+```make
+format:    uv run black . && uv run ruff check --fix .
+lint:      uv run black --check . && uv run ruff check .
+typecheck: uv run mypy && uv run lint-imports
+test:      uv run pytest -m "not e2e" --cov --cov-report=term-missing --cov-report=xml
+check:     lint typecheck test
+```
+
+`.pre-commit-config.yaml`: `pre-commit-hooks` (trailing-whitespace, end-of-file-fixer, check-yaml, check-added-large-files), `black`, `ruff-pre-commit` (`ruff` hook with `--fix`, **not** `ruff-format`), and a `local` hook `mypy` with `entry: uv run mypy`, `language: system`, `pass_filenames: false`. Pin every `rev` to a release tag that exists when you write it. Then `uv run pre-commit install`.
 - `[tool.pytest.ini_options] asyncio_mode = "auto"`, `markers = ["e2e: needs docker compose stack", "slow: pauses containers"]`, `addopts = "-m 'not e2e'"`
 - import-linter contracts:
 
@@ -157,7 +172,8 @@ Run: `uv run pytest tests/unit/test_config.py tests/test_architecture.py -v`
 
 - [ ] **Step 5: Run — expect PASS; gates clean**
 
-Run: `uv run pytest tests/unit/test_config.py tests/test_architecture.py -v && uv run ruff check . && uv run ruff format --check . && uv run mypy`
+Run: `uv run pytest tests/unit/test_config.py tests/test_architecture.py -v && make lint typecheck && uv run pre-commit run --all-files`
+Expected: tests pass; black reports nothing to reformat; ruff, mypy, import-linter and every pre-commit hook pass.
 
 - [ ] **Step 6: Commit** — `git add -A && git commit -m "chore: scaffold project with settings, logging and quality gates"`
 
@@ -464,7 +480,7 @@ async def test_oversized_body_413(api_client):     # 100 KiB user_id -> 413
 - [ ] **Step 3: Implement** following the fastapi conventions in Global Constraints.
 - [ ] **Step 4: Run full suite & gates — expect PASS**
 
-Run: `uv run pytest -v && uv run ruff check . && uv run mypy && uv run lint-imports`
+Run: `make check`
 
 - [ ] **Step 5: Smoke run** — with a local Postgres, `DATABASE_URL=… uv run alembic upgrade head && uv run fastapi dev` → open `/docs`, the five routes appear.
 - [ ] **Step 6: Commit** — `feat(api): expose subscription and payment endpoints`

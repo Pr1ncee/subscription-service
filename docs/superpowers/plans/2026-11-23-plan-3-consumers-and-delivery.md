@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Idempotent FastStream consumers that notify on payment results, extend subscriptions, deliver notifications and handle dead letters. Plus a one-command `docker compose` stack, an end-to-end test, and the AI-process artifacts reviewers asked for.
+**Goal:** Idempotent FastStream consumers that notify on payment results, extend subscriptions, deliver notifications and handle dead letters. Plus a production-grade container image, a one-command `docker compose` stack, an end-to-end test, a GitHub Actions CI pipeline, and the AI-process artifacts reviewers asked for.
 
 **Architecture:** Consumer logic lives in plain service classes (`services/consumers.py`), each with an `async handle(envelope)`. Every handler dedups through the inbox inside the same transaction as its side effects. FastStream handlers (`consumers/handlers.py`) are thin: they decode the envelope, call the service, and leave ack/nack to the broker policy. `consumers/app.py` is the composition root and the only place a `NotificationSender` implementation is chosen.
 
-**Tech Stack:** as Plans 1–2 + FastStream subscribers, Docker, docker compose.
+**Tech Stack:** as Plans 1–2 + FastStream subscribers, Docker (multi-stage, uv), docker compose, GitHub Actions, hadolint, actionlint, pip-audit, Dependabot.
 
 **Spec:** `docs/superpowers/specs/2026-11-23-subscription-payments-design.md` (§5.1.4, §5.2, §7.3 consumers, §7.5, §10, §11)
 
@@ -19,6 +19,20 @@
 - Handlers use `AckPolicy.NACK_ON_ERROR` (requeue → quorum `x-delivery-limit` counts → dead-letter). A malformed envelope raises `RejectMessage` and goes straight to the DLQ. The DLQ subscriber uses `AckPolicy.REJECT_ON_ERROR` so a bug there cannot loop forever.
 - Notification-sender stale rule: for a reminder, `target_expires_on != subscription.expected_expires_on` → `cancelled`, not sent.
 - `PermanentSendError` → `failed` with `last_error`, committed. Any other exception propagates, the whole tx rolls back (including the inbox row), and the message is redelivered.
+- Container rules (from the deployment-patterns skill):
+  - multi-stage build
+  - base images pinned to exact tags, never `latest`
+  - dependency layer copied before the source so builds cache
+  - no dev dependencies in the runtime image
+  - non-root user (uid `1001`)
+  - no secrets in the image; all config comes from env (12-factor), validated at startup by `Settings`
+  - `.dockerignore` excludes `.git`, `.venv`, `tests`, caches and `.idea`
+  - resource limits set in compose
+- CI scope is **CI only**: lint, types, tests, image build and a compose smoke test. Nothing is pushed to a registry and nothing is deployed.
+
+### Rollback compatibility (deployment-patterns)
+
+Migrations must stay backward-compatible with the previous image (expand → migrate → contract). The worker, consumers and API may briefly run mixed versions during a rolling restart. This is documented in the README, not automated.
 
 ## Review Focus
 
@@ -143,12 +157,22 @@ async def test_delivery_limit_dead_letters_and_marks_failed(stack_with(delivery_
 - Create: `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `.env.example`, `tests/e2e/test_compose_flow.py`
 
 **Interfaces:**
-- Produces: one image (multi-stage, `ghcr.io/astral-sh/uv` builder, `uv sync --frozen --no-dev`, non-root user) with three commands:
-  - `api`: `fastapi run --host 0.0.0.0 --port 8000`
+- Produces: one image, `Dockerfile` with two stages:
+  - **builder** — `FROM python:3.12-slim-bookworm`, then `COPY --from=ghcr.io/astral-sh/uv:<exact version from uv.lock's generator / local "uv --version"> /uv /bin/uv`. Env: `UV_COMPILE_BYTECODE=1`, `UV_LINK_MODE=copy`. First `COPY pyproject.toml uv.lock ./` and `RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-install-project`. Then `COPY src alembic.ini ./` and `uv sync --frozen --no-dev`.
+  - **runtime** — `FROM python:3.12-slim-bookworm`; `useradd -r -u 1001 app`. Copies `/app/.venv`, `src` and `alembic.ini` with `--chown=app`. `ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1`, `USER app`, `EXPOSE 8000`. Default `CMD ["fastapi", "run", "--host", "0.0.0.0", "--port", "8000"]`. No `HEALTHCHECK` in the Dockerfile: the same image runs the worker and consumers, which serve no HTTP. Health checks are per service in compose.
+- Process commands (compose `command:`):
+  - `api`: default CMD
   - `worker`: `python -m subscriptions_service.worker`
   - `consumers`: `python -m subscriptions_service.consumers`
   - `migrate` (one-shot): `alembic upgrade head`
-- Compose services: `postgres` (`postgres:16-alpine`, `pg_isready` healthcheck, volume), `rabbitmq` (`rabbitmq:4-management-alpine`, `rabbitmq-diagnostics -q ping` healthcheck, UI on 15672), `migrate` (depends on postgres healthy), `api` (port 8000, depends on `migrate: service_completed_successfully`, healthcheck `/health/ready`), `worker` and `consumers` (depend on migrate done + rabbitmq healthy, `restart: unless-stopped`). Env from `.env.example` values.
+- `docker-compose.yml`:
+  - **image and env:** app services use `image: ${IMAGE:-subscriptions-service:local}` plus `build: .`, so CI can inject a prebuilt image. Env comes from `.env.example` via `env_file`.
+  - **postgres:** `postgres:16.4-alpine`, `pg_isready` healthcheck, named volume.
+  - **rabbitmq:** `rabbitmq:4.0-management-alpine` (exact tags), `rabbitmq-diagnostics -q ping` healthcheck, UI on 15672.
+  - **migrate:** depends on postgres healthy.
+  - **api:** port 8000, depends on `migrate: service_completed_successfully`, healthcheck `python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"`.
+  - **worker and consumers:** depend on migrate done + rabbitmq healthy, `restart: unless-stopped`.
+  - **resource limits:** every app service gets `deploy.resources.limits` (`cpus: "0.5"`, `memory: 256M`).
 
 - [ ] **Step 1: Write the E2E test** (marked `e2e`, skipped unless `E2E_BASE_URL` is set)
 
@@ -164,19 +188,69 @@ async def test_full_flow_against_running_stack():
         assert datetime.fromisoformat(sub["expected_expires_on"]) == exp + timedelta(days=30)
 ```
 
-- [ ] **Step 2: Build and run the stack**
+- [ ] **Step 2: Lint the Dockerfile and check image hygiene**
+
+Run: `docker run --rm -i hadolint/hadolint:<pinned tag> < Dockerfile`, then `docker build -t subscriptions-service:local .` and `docker run --rm subscriptions-service:local id -u`
+Expected: hadolint reports no warnings; the uid printed is `1001`; `docker run --rm subscriptions-service:local python -c "import pytest"` fails (no dev dependencies in the image).
+
+- [ ] **Step 3: Build and run the stack**
 
 Run: `docker compose up -d --build --wait`
 Expected: all services `healthy` or `running`; `migrate` exited 0.
 
-- [ ] **Step 3: Run E2E — expect PASS** — `E2E_BASE_URL=http://localhost:8000 uv run pytest -m e2e -v`
-- [ ] **Step 4: Outage drill (manual, recorded in README).** Run `docker compose stop rabbitmq`, POST a payment (expect `201`), and check that `GET /payments/{id}` shows `published: false` with `attempts` growing. Then run `docker compose start rabbitmq` and expect `published: true` within ~60 s.
-- [ ] **Step 5: Tear down** — `docker compose down -v`
-- [ ] **Step 6: Commit** — `build: add Dockerfile, compose stack and e2e test`
+- [ ] **Step 4: Run E2E — expect PASS** — `E2E_BASE_URL=http://localhost:8000 uv run pytest -m e2e -v`
+- [ ] **Step 5: Outage drill (manual, recorded in README).** Run `docker compose stop rabbitmq`, POST a payment (expect `201`), and check that `GET /payments/{id}` shows `published: false` with `attempts` growing. Then run `docker compose start rabbitmq` and expect `published: true` within ~60 s.
+- [ ] **Step 6: Tear down** — `docker compose down -v`
+- [ ] **Step 7: Commit** — `build: add Dockerfile, compose stack and e2e test`
 
 ---
 
-### Task 14: Agent artifacts & README
+### Task 14: CI pipeline (GitHub Actions)
+
+**Files:**
+- Create: `.github/workflows/ci.yml`, `.github/dependabot.yml`
+
+**Interfaces:**
+- Consumes: `make lint`, `make typecheck`, `make test` (Task 1); `Dockerfile`, compose `IMAGE` variable, e2e test (Task 13).
+- Produces: workflow `CI` triggered on `pull_request` and on `push` to `main`. It sets `permissions: contents: read` and `concurrency: { group: ci-${{ github.ref }}, cancel-in-progress: true }`. Every third-party action is pinned to a major version tag. Jobs:
+  1. **`quality`**:
+     - `actions/checkout@v4`
+     - `astral-sh/setup-uv@v5` (`enable-cache: true`, `python-version: "3.12"`)
+     - `uv sync --frozen`, `make lint`, `make typecheck`
+     - `uv export --frozen --no-dev --no-hashes | uvx pip-audit --strict -r /dev/stdin`, which scans dependencies for CVEs
+  2. **`test`** (runs in parallel with `quality`):
+     - same setup steps as `quality`
+     - `uv run pytest -m "slow or not slow" --cov --cov-report=xml --junitxml=junit.xml`. Testcontainers uses the runner's Docker. Coverage must stay ≥ 85 % (`fail_under`).
+     - `actions/upload-artifact@v4` (`if: always()`) for `coverage.xml` and `junit.xml`
+  3. **`docker`** (`needs: [quality, test]`):
+     - `hadolint/hadolint-action@v3.1.0`
+     - `docker/setup-buildx-action@v3`
+     - `docker/build-push-action@v6` with `push: false`, `load: true`, `tags: subscriptions-service:ci`, `cache-from: type=gha`, `cache-to: type=gha,mode=max`
+     - `IMAGE=subscriptions-service:ci docker compose up -d --wait`
+     - install uv and run `E2E_BASE_URL=http://localhost:8000 uv run pytest -m e2e -v`
+     - on `failure()`, `docker compose logs`
+     - `if: always()` `docker compose down -v`
+- `dependabot.yml`: weekly updates for `github-actions`, `docker` and `uv` ecosystems.
+
+- [ ] **Step 1: Write `ci.yml` and `dependabot.yml`**
+
+- [ ] **Step 2: Lint the workflow locally**
+
+Run: `docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:<pinned tag> -color`
+Expected: no output, exit 0.
+
+- [ ] **Step 3: Reproduce each CI job locally with the same commands**
+
+Run: `uv sync --frozen && make lint typecheck && uv run pytest -m "slow or not slow" --cov && IMAGE=subscriptions-service:ci docker build -t subscriptions-service:ci . && IMAGE=subscriptions-service:ci docker compose up -d --wait && E2E_BASE_URL=http://localhost:8000 uv run pytest -m e2e && docker compose down -v`
+Expected: every command exits 0.
+
+- [ ] **Step 4: Commit** — `ci: add GitHub Actions pipeline with lint, tests and image smoke test`
+
+- [ ] **Step 5: Hand off (do NOT push).** Tell the user the pipeline is committed locally and that it only runs after *they* push to GitHub. Pushing needs their explicit approval (user rule).
+
+---
+
+### Task 15: Agent artifacts & README
 
 **Files:**
 - Create: `CLAUDE.md`, `.claude/skills/outbox-checklist/SKILL.md`, `README.md` (replace the uv stub)
@@ -187,7 +261,8 @@ Expected: all services `healthy` or `running`; `migrate` exited 0.
   - the outbox rule: never publish to the broker from `api`/`services`; new events go through `OutboxRepository.add` in the same UoW
   - every consumer dedups through `InboxRepository`
   - composition roots are `api/deps.py`, `worker/main.py` and `consumers/app.py`
-  - commands: test, lint, types, compose, e2e
+  - commands: `make format|lint|typecheck|test|check`, compose, e2e; formatter is black, ruff is lint-only, never run `ruff format`
+  - the CI job map (`quality`, `test`, `docker`) and the rule that CI runs exactly the `make` targets, so a green `make check` locally predicts green CI
   - the skills to apply: `fastapi`, `clean-architecture` (in repo), `python-patterns`, `outbox-checklist`
   - commit style: Conventional Commits, no AI trailers
 - `outbox-checklist/SKILL.md`: frontmatter `name: outbox-checklist`, `description: Use when adding or changing an event type, outbox write, queue, or consumer`. The checklist:
@@ -204,7 +279,10 @@ Expected: all services `healthy` or `running`; `migrate` exited 0.
   - Delivery guarantee explained (outbox → relay → inbox, at-least-once, what can duplicate: notification send after crash)
   - Design decisions: link to the spec, the requester's domain calls, the expiry-never-backwards rule
   - Operations: health endpoints, DLQ, outage drill from Task 13, worker restart policy
-  - Testing: `uv run pytest`, slow, e2e
+  - Development: `uv sync`, `uv run pre-commit install`, `make check`; linters (black, ruff, mypy strict, import-linter)
+  - Testing: `make test`, slow, e2e; coverage floor 85 %
+  - CI: CI status badge, what each job does, and the rollback-compatibility rule for migrations
+  - Container: image layout, non-root, how one image runs four roles
   - How this was built (AI-assisted): spec, plans, CLAUDE.md, skills, builder check
   - Non-goals and future work (spec §14)
 
@@ -212,6 +290,6 @@ Expected: all services `healthy` or `running`; `migrate` exited 0.
 - [ ] **Step 2: Verify the README quick start from a clean checkout** — `docker compose down -v && docker compose up -d --build --wait`, then run every curl in the README and get the documented status codes.
 - [ ] **Step 3: Final gates — expect all green**
 
-Run: `uv run pytest -m "slow or not slow" -v && uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run lint-imports`
+Run: `make lint typecheck && uv run pytest -m "slow or not slow" --cov -v && docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:<pinned tag>`
 
 - [ ] **Step 4: Commit** — `docs: add README, CLAUDE.md and outbox-checklist skill`
