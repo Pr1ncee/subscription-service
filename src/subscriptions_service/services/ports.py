@@ -39,6 +39,10 @@ class PermanentSendError(Exception):
     """The notification can never be delivered (e.g. invalid address); do not retry."""
 
 
+class TransientSendError(RuntimeError):
+    """The sender failed in a way that may succeed on retry (wraps the original error)."""
+
+
 class NotificationSender(Protocol):
     async def send(self, message: OutgoingNotification) -> None:
         """Deliver to the user. Raise `PermanentSendError` for non-retryable failures;

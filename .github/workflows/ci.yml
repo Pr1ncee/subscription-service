@@ -38,7 +38,7 @@ jobs:
           enable-cache: true
           python-version: "3.12"
       - run: uv sync --frozen
-      - name: Run all tests except e2e (coverage floor enforced by fail_under)
+      - name: Run all tests (e2e skips itself without a stack; coverage floor via fail_under)
         run: uv run pytest -m "slow or not slow" --cov --cov-report=xml --junitxml=junit.xml
       - uses: actions/upload-artifact@v4
         if: always()

@@ -65,9 +65,13 @@ api ──tx: payment + outbox row──► PostgreSQL ◄──poll (SKIP LOCKE
    event (same `event_id`).
 4. **Idempotent consumers (inbox).** Each consumer records `(consumer, event_id)` in
    `processed_events` in the same transaction as its side effects; a redelivery is acked and skipped.
-   A failed handler rolls back everything (inbox row included) and the message is retried with
-   `reject(requeue=True)`; after `CONSUMER_DELIVERY_LIMIT` attempts it is dead-lettered to
-   `events.dlq`, where the DLQ handler marks the notification `failed`.
+   A failed handler rolls back everything (inbox row included). Failures are classified:
+   - **database unreachable** — the consumer waits (exponential backoff, ≤ 5 s) and retries the
+     same delivery without spending the delivery limit, so a brief DB outage never drops an event;
+   - **malformed envelope or payload** — poison: dead-lettered immediately;
+   - **anything else** (e.g. the sender failed) — backoff by delivery count, then
+     `reject(requeue=True)`; after `CONSUMER_DELIVERY_LIMIT` attempts the message is dead-lettered to
+     `events.dlq`, where the DLQ handler marks the notification `failed`.
 
 **What can duplicate:** only the external notification send — a crash after the sender returned but
 before the commit sends it again. Subscription extension and notification creation never double-apply.
@@ -133,10 +137,10 @@ see [`.env.example`](.env.example).
 
 ## Testing
 
-- `make test` — unit + integration tests against real PostgreSQL and RabbitMQ (testcontainers),
-  coverage floor **85 %** (currently ~97 %).
-- `uv run pytest -m "slow or not slow"` — also the broker-pause tests.
-- `E2E_BASE_URL=http://localhost:8000 uv run pytest -m e2e` — happy path against the compose stack.
+- `make test` — every test except e2e (unit + integration against real PostgreSQL and RabbitMQ via
+  testcontainers, including the `slow` broker-pause tests), coverage floor **85 %** (currently ~97 %).
+- `E2E_BASE_URL=http://localhost:8000 uv run pytest -m e2e` — happy path against the compose stack
+  (the e2e test skips itself when `E2E_BASE_URL` is not set).
 
 Notable tests: payment + outbox atomicity, concurrent duplicate payments, relay crash window
 (republish with the same `event_id`), broker pause/recovery, stale reminder after extension,
@@ -153,7 +157,10 @@ GitHub Actions (`.github/workflows/ci.yml`), on pull requests and pushes to `mai
 | `test` | all tests incl. slow, coverage ≥ 85 %, uploads `coverage.xml` / `junit.xml` |
 | `docker` | hadolint, image build, `docker compose up --wait`, e2e test |
 
-CI runs exactly the `make` targets, so a green `make check` locally predicts green CI. Dependabot
+The `quality` job runs the same `make lint` / `make typecheck` targets as local development, and the
+`test` job runs the same tests as `make test` (plus coverage/JUnit reports), so a green `make check`
+predicts green `quality` and `test` jobs. The dependency audit, hadolint, image build and compose e2e
+run only in CI (the commands are in the workflow if you want them locally). Dependabot
 updates actions, base images and Python dependencies weekly. Nothing is pushed to a registry or deployed.
 
 **Rollback compatibility:** migrations must stay compatible with the previous image

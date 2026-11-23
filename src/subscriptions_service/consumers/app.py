@@ -1,7 +1,7 @@
 """Composition root for the consumers process."""
 
 from faststream import FastStream
-from faststream.rabbit import RabbitBroker
+from faststream.rabbit import Channel, RabbitBroker
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from subscriptions_service.adapters.clock import SystemClock
@@ -18,6 +18,8 @@ from subscriptions_service.services.consumers import (
     SubscriptionExtender,
 )
 from subscriptions_service.services.ports import Clock, NotificationSender
+
+CONSUMER_PREFETCH = 10
 
 
 def create_app(
@@ -43,7 +45,11 @@ def create_app(
         delivery=NotificationDelivery(uow_factory, clock, sender or LoggingSender()),
         dead_letters=DeadLetterHandler(uow_factory, clock),
     )
-    broker = RabbitBroker(settings.rabbitmq_url)
+    # Bounded prefetch: a backlog stays in RabbitMQ instead of in this process's memory,
+    # and extra replicas share the work.
+    broker = RabbitBroker(
+        settings.rabbitmq_url, default_channel=Channel(prefetch_count=CONSUMER_PREFETCH)
+    )
     register_handlers(broker, services, settings.consumer_delivery_limit)
     app = FastStream(broker)
 

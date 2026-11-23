@@ -8,7 +8,7 @@ from datetime import timedelta
 import pytest
 
 from subscriptions_service.domain.enums import EventType, PaymentStatus
-from subscriptions_service.domain.events import EventEnvelope
+from subscriptions_service.domain.events import EventEnvelope, InvalidEnvelopeError
 from subscriptions_service.repositories.uow import UnitOfWorkFactory
 from subscriptions_service.services.consumers import (
     DeadLetterHandler,
@@ -452,3 +452,42 @@ async def test_dead_letter_payment_event_only_logs(
         r.levelno == logging.ERROR and "dead-lettered" in r.getMessage() for r in caplog.records
     )
     assert await subs.get("s1") == before
+
+
+@pytest.mark.parametrize("payload", [{}, {"notification_id": "not-a-uuid"}, {"notification_id": 7}])
+async def test_delivery_bad_payload_is_poison(
+    delivery: NotificationDelivery, clock: FakeClock, payload: dict[str, object]
+) -> None:
+    env = EventEnvelope.new(EventType.NOTIFICATION_DUE, payload, clock.now())
+    with pytest.raises(InvalidEnvelopeError):
+        await delivery.handle(env)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"subscription_id": "s1", "payment_id": "x", "status": "succeeded", "period_days": 30},
+        {"subscription_id": "s1", "payment_id": str(uuid.uuid4()), "status": "nope"},
+    ],
+)
+async def test_payment_handlers_bad_payload_is_poison(
+    notifier: PaymentResultNotifier,
+    extender: SubscriptionExtender,
+    clock: FakeClock,
+    payload: dict[str, object],
+) -> None:
+    env = EventEnvelope.new(EventType.PAYMENT_SUCCEEDED, payload, clock.now())
+    with pytest.raises(InvalidEnvelopeError):
+        await notifier.handle(env)
+    with pytest.raises(InvalidEnvelopeError):
+        await extender.handle(env)
+
+
+async def test_dead_letter_with_bad_payload_is_logged_not_raised(
+    dead_letters: DeadLetterHandler, clock: FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    env = EventEnvelope.new(EventType.NOTIFICATION_DUE, {"notification_id": "x"}, clock.now())
+    with caplog.at_level(logging.ERROR):
+        await dead_letters.handle(env, "delivery_limit")  # must not raise: it would loop forever
+    assert any("dead-lettered" in r.getMessage() for r in caplog.records)

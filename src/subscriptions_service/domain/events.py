@@ -53,5 +53,5 @@ class EventEnvelope:
             )
         except InvalidEnvelopeError:
             raise
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as e:
             raise InvalidEnvelopeError(f"invalid event envelope: {e}") from e

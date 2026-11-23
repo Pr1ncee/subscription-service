@@ -22,7 +22,9 @@ Implementation plans: `docs/superpowers/plans/`.
   Only the worker's relay publishes.
 - **Inbox rule:** every consumer has a `CONSUMER_NAME` and calls `uow.inbox.try_mark_processed(...)`
   first, in the same transaction as its side effects. Consumers must be safe under redelivery.
-- **Acks:** consumers use `AckPolicy.MANUAL` and settle only through `consumers/acking.py::settle`.
+- **Acks:** consumers use `AckPolicy.MANUAL` and settle only through `consumers/acking.py::settle`;
+  every path must settle exactly once. Payload problems raise `InvalidEnvelopeError` (poison → DLQ);
+  DB connection errors are waited out in-process (they must not spend the delivery limit).
   Retries are `reject(requeue=True)`, never `nack` (RabbitMQ 4.3 does not count requeued nacks
   toward the delivery limit).
 - **Lock order** is subscription → notification in every transaction that touches both.
@@ -38,9 +40,8 @@ Implementation plans: `docs/superpowers/plans/`.
 | Format | `make format` (black, then `ruff check --fix`) |
 | Lint | `make lint` (black --check + ruff) |
 | Types + layer contracts | `make typecheck` (mypy strict + import-linter) |
-| Tests | `make test` (Docker required: testcontainers start Postgres and RabbitMQ) |
+| Tests | `make test` — all but e2e, incl. `slow` (Docker required: testcontainers start Postgres and RabbitMQ) |
 | Everything | `make check` = lint + typecheck + test |
-| Slow/broker-pause tests too | `uv run pytest -m "slow or not slow"` |
 | Full stack | `docker compose up -d --build --wait` |
 | E2E against the stack | `E2E_BASE_URL=http://localhost:8000 uv run pytest -m e2e` |
 
@@ -50,7 +51,9 @@ Implementation plans: `docs/superpowers/plans/`.
 
 `.github/workflows/ci.yml` runs three jobs: `quality` (make lint, make typecheck, pip-audit),
 `test` (all tests incl. slow, coverage ≥ 85 %), `docker` (hadolint, image build, compose up, e2e).
-CI runs exactly the `make` targets, so a green `make check` locally predicts a green CI.
+`quality` runs `make lint` + `make typecheck`; `test` runs the same tests as `make test`; so a green
+`make check` predicts those two jobs. pip-audit, hadolint, the image build and the compose e2e run only
+in CI — run their workflow commands locally when you touch dependencies, the Dockerfile or compose.
 
 ## Skills to apply
 

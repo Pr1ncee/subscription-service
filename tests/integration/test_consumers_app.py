@@ -20,6 +20,8 @@ from subscriptions_service.consumers import acking
 from subscriptions_service.consumers.acking import Outcome
 from subscriptions_service.consumers.app import create_app
 from subscriptions_service.db.tables import ProcessedEventRow
+from subscriptions_service.domain.enums import EventType
+from subscriptions_service.domain.events import EventEnvelope
 from subscriptions_service.repositories.uow import UnitOfWorkFactory
 from subscriptions_service.services.payments import PaymentService
 from subscriptions_service.services.ports import NotificationSender
@@ -286,9 +288,17 @@ async def test_dlq_handler_keeps_dead_letter_while_db_down(
     clock: FakeClock,
     settle_spy: SettleSpy,
 ) -> None:
-    flaky = FlakySessionFactory(session_factory, failures=3)
+    flaky = FlakySessionFactory(session_factory, failures=0)
+
+    class ArmsOutageOnLastAttempt(RecordingSender):
+        async def send(self, message: Any) -> None:
+            self.attempts += 1
+            if self.attempts == 2:  # delivery_limit=1 → 2nd attempt is the last one
+                flaky.failures_left = 3  # Postgres "goes down" just as it is dead-lettered
+            raise RuntimeError("down")
+
     await stack_factory.start(
-        delivery_limit=1, sender=RecordingSender(RuntimeError("down")), session_factory=flaky
+        delivery_limit=1, sender=ArmsOutageOnLastAttempt(), session_factory=flaky
     )
     note_id = await _queue_reminder(subs, sched, relay, clock)
 
@@ -366,3 +376,87 @@ async def test_lost_ack_redelivery_has_no_second_side_effect(
 
 async def _settled(spy: SettleSpy, queue: str, count: int) -> bool:
     return len(spy.deliveries(queue)) >= count
+
+
+async def test_db_blip_does_not_dead_letter_payment_extension(  # review C1
+    stack_factory: StackFactory,
+    session_factory: async_sessionmaker[AsyncSession],
+    psvc: PaymentService,
+    subs: SubscriptionService,
+    relay: OutboxRelay,
+    clock: FakeClock,
+    settle_spy: SettleSpy,
+) -> None:
+    pay = await psvc.record(CMD)  # s1 expires now+10D, period 30
+    flaky = FlakySessionFactory(session_factory, failures=12)  # more than 2 queues x 3 attempts
+    await stack_factory.start(delivery_limit=2, session_factory=flaky)
+    assert await relay.run_once() == 1
+
+    async def extended() -> bool:
+        return (await subs.get("s1")).expected_expires_on == clock.now() + 40 * D
+
+    async def notified() -> bool:
+        return (await psvc.get_status(pay.view.payment_id)).notification is not None
+
+    await wait_until(extended, limit_s=30)
+    await wait_until(notified, limit_s=30)
+    assert flaky.failures_left == 0  # the outage really happened
+    assert settle_spy.deliveries(DLQ_NAME) == []
+    assert {r.outcome for r in settle_spy.records} == {Outcome.ACK}
+
+
+async def _publish_raw(broker: RabbitBroker, body: bytes, routing_key: str) -> None:
+    await broker.publish(body, exchange=EVENTS_EXCHANGE, routing_key=routing_key)
+
+
+async def test_bad_payload_is_dead_lettered_once_and_acked_in_dlq(  # review I2
+    stack_factory: StackFactory,
+    rabbit_broker: RabbitBroker,
+    settle_spy: SettleSpy,
+    clock: FakeClock,
+) -> None:
+    await stack_factory.start()
+    env = EventEnvelope.new(EventType.NOTIFICATION_DUE, {"notification_id": "nope"}, clock.now())
+    await _publish_raw(rabbit_broker, env.to_json(), "notification.due")
+
+    async def recorded() -> bool:
+        return settle_spy.acked(DLQ_NAME) >= 1
+
+    await wait_until(recorded)
+    await asyncio.sleep(1.5)  # a looping DLQ handler would retry every second
+    assert [r.outcome for r in settle_spy.deliveries(SEND_QUEUE)] == [Outcome.DEAD_LETTER]
+    assert [r.outcome for r in settle_spy.deliveries(DLQ_NAME)] == [Outcome.ACK]
+
+
+async def test_envelope_with_non_string_event_id_is_settled(  # review I3
+    stack_factory: StackFactory, rabbit_broker: RabbitBroker, settle_spy: SettleSpy
+) -> None:
+    await stack_factory.start()
+    body = (
+        b'{"event_id": 123, "event_type": "notification.due",'
+        b' "occurred_at": "2026-01-01T12:00:00+00:00", "payload": {}}'
+    )
+    await _publish_raw(rabbit_broker, body, "notification.due")
+
+    async def dead_lettered_and_acked() -> bool:
+        return settle_spy.acked(DLQ_NAME) >= 1
+
+    await wait_until(dead_lettered_and_acked)
+    assert [r.outcome for r in settle_spy.deliveries(SEND_QUEUE)] == [Outcome.DEAD_LETTER]
+
+
+async def test_consumers_use_bounded_prefetch(  # review M5 (re-graded Important)
+    stack_factory: StackFactory, rabbit_management: str
+) -> None:
+    await stack_factory.start()
+
+    async def consumers_prefetch() -> set[int]:
+        async with httpx.AsyncClient(auth=("guest", "guest"), timeout=10) as client:
+            rows = (await client.get(f"{rabbit_management}/consumers/%2F")).json()
+        return {row["prefetch_count"] for row in rows}
+
+    async def registered() -> bool:
+        return len(await consumers_prefetch()) > 0
+
+    await wait_until(registered)
+    assert await consumers_prefetch() == {10}

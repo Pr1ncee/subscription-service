@@ -32,6 +32,10 @@ def test_envelope_new_generates_unique_ids() -> None:
         b' "occurred_at": "2026-01-01T12:00:00+00:00", "payload": {}}',
         b'{"event_id": "8f0e5b8e-6c1f-4f5e-9a51-2a8f0f6f2d11", "event_type": "payment.failed",'
         b' "occurred_at": "2026-01-01T12:00:00+00:00", "payload": []}',
+        b'{"event_id": 123, "event_type": "payment.failed",'
+        b' "occurred_at": "2026-01-01T12:00:00+00:00", "payload": {}}',
+        b'{"event_id": "8f0e5b8e-6c1f-4f5e-9a51-2a8f0f6f2d11", "event_type": "payment.failed",'
+        b' "occurred_at": 5, "payload": {}}',
     ],
 )
 def test_invalid_envelope_raises(raw: bytes) -> None:

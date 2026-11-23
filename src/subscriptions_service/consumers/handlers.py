@@ -9,6 +9,8 @@ from faststream import AckPolicy
 from faststream.message import StreamMessage
 from faststream.rabbit import RabbitBroker
 from faststream.rabbit.annotations import RabbitMessage
+from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from subscriptions_service.adapters.rabbit_topology import (
     DLQ_NAME,
@@ -32,6 +34,22 @@ from subscriptions_service.services.consumers import (
 logger = logging.getLogger(__name__)
 
 DLQ_RETRY_DELAY_S = 1.0
+
+# Database unreachable: wait and retry in-process. Every message needs the database, so
+# spending the delivery limit here would dead-letter healthy events during a brief outage.
+INFRA_ERRORS: tuple[type[BaseException], ...] = (
+    OperationalError,
+    InterfaceError,
+    PoolTimeoutError,
+    ConnectionError,
+)
+INFRA_RETRY_BASE_S = 0.2
+INFRA_RETRY_MAX_S = 5.0
+
+# Other failures are retried via reject(requeue=True), which counts toward the delivery
+# limit; back off first so the limit is not spent within milliseconds.
+RETRY_BASE_S = 0.5
+RETRY_MAX_S = 10.0
 
 Handler = Callable[[bytes, RabbitMessage], Awaitable[None]]
 
@@ -72,17 +90,25 @@ def _event_handler(queue: str, handle: Callable[[EventEnvelope], Awaitable[None]
     async def handler(body: bytes, message: RabbitMessage) -> None:
         try:
             envelope = EventEnvelope.from_json(body)
-        except InvalidEnvelopeError as e:
+        except Exception as e:  # any undecodable body is poison; it must still be settled
             logger.error("malformed event dead-lettered", extra={"queue": queue, "error": str(e)})
             await acking.settle(message, Outcome.DEAD_LETTER, queue=queue)
             return
         try:
-            await handle(envelope)
+            await _waiting_out_db_outages(handle, envelope, queue)
+        except InvalidEnvelopeError as e:
+            logger.error(
+                "event with invalid payload dead-lettered",
+                extra={"queue": queue, "event_id": str(envelope.event_id), "error": str(e)},
+            )
+            await acking.settle(message, Outcome.DEAD_LETTER, queue=queue)
+            return
         except Exception:
             logger.exception(
                 "event handling failed; will retry",
                 extra={"queue": queue, "event_id": str(envelope.event_id)},
             )
+            await asyncio.sleep(_retry_delay(message))
             await acking.settle(message, Outcome.RETRY, queue=queue)
             return
         await acking.settle(message, Outcome.ACK, queue=queue)
@@ -95,7 +121,7 @@ def _dead_letter_handler(dead_letters: DeadLetterHandler) -> Handler:
     async def handle_dead_letter(body: bytes, message: RabbitMessage) -> None:
         try:
             envelope = EventEnvelope.from_json(body)
-        except InvalidEnvelopeError as e:
+        except Exception as e:
             # Nothing to record for an undecodable body; logging it is all we can do.
             logger.error("undecodable dead letter", extra={"error": str(e), "body": body[:200]})
             await acking.settle(message, Outcome.ACK, queue=DLQ_NAME)
@@ -114,3 +140,34 @@ def _dead_letter_handler(dead_letters: DeadLetterHandler) -> Handler:
         await acking.settle(message, Outcome.ACK, queue=DLQ_NAME)
 
     return handle_dead_letter
+
+
+async def _waiting_out_db_outages(
+    handle: Callable[[EventEnvelope], Awaitable[None]], envelope: EventEnvelope, queue: str
+) -> None:
+    attempt = 0
+    while True:
+        try:
+            await handle(envelope)
+            return
+        except INFRA_ERRORS as e:
+            delay = min(INFRA_RETRY_BASE_S * 2**attempt, INFRA_RETRY_MAX_S)
+            attempt += 1
+            logger.warning(
+                "database unavailable; waiting before retrying the same delivery",
+                extra={
+                    "queue": queue,
+                    "event_id": str(envelope.event_id),
+                    "delay_s": delay,
+                    "error": str(e),
+                },
+            )
+            await asyncio.sleep(delay)
+
+
+def _retry_delay(message: RabbitMessage) -> float:
+    try:
+        deliveries = int((message.headers or {}).get("x-delivery-count", 0))
+    except (TypeError, ValueError):
+        deliveries = 0
+    return float(min(RETRY_BASE_S * 2 ** min(deliveries, 16), RETRY_MAX_S))
