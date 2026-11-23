@@ -1,9 +1,19 @@
 import json
 import logging
+from collections.abc import Iterator
 
 import pytest
 
 from subscriptions_service.logs import configure_logging
+
+
+@pytest.fixture(autouse=True)
+def restore_root_logger() -> Iterator[None]:
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    yield
+    root.handlers[:] = handlers
+    root.setLevel(level)
 
 
 def test_configure_logging_emits_one_json_line_with_extras(
