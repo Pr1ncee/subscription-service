@@ -186,7 +186,27 @@ async def test_dlq_handler_keeps_dead_letter_while_db_down(stack_with(session_fa
 async def test_retry_uses_reject_not_nack(...):
     # spy on settle(): with a transiently failing sender, every retry outcome is Outcome.RETRY
     # and x-delivery-count on the redelivered message increases (assert >= 1 on the 2nd delivery)
+
+async def test_lost_ack_redelivery_has_no_second_side_effect(stack_factory, subs, psvc, relay, clock, settle_spy):
+    # consumer commits, ack never reaches the broker, broker redelivers -> inbox dedup, no double extension
+    await subs.upsert("s1", "u1", 30, clock.now() + 5 * D)
+    pay = await psvc.record(CMD)                                    # period_days = 30
+
+    settle_spy.drop_first_ack(queue="payments.extend-subscription") # first ACK is swallowed: not sent
+    app = await stack_factory.start()
+    await relay.run_once()
+    await wait_until(lambda: subs_expiry("s1") == clock.now() + 35 * D)   # extender committed
+    await stack_factory.stop(app)       # connection closes with the message unacked -> broker requeues it
+
+    app = await stack_factory.start()   # fresh connection receives the redelivery
+    await wait_until(lambda: settle_spy.acked(queue="payments.extend-subscription") == 1)
+    assert settle_spy.deliveries(queue="payments.extend-subscription") == 2
+    assert settle_spy.last_redelivered(queue="payments.extend-subscription") is True   # AMQP redelivered flag
+    assert subs_expiry("s1") == clock.now() + 35 * D                # still +30 days, NOT +60
+    # inbox has exactly one ("subscription-extender", event_id) row
 ```
+
+`settle_spy` is a test fixture. It wraps `consumers.acking.settle` via `monkeypatch` and records per-queue deliveries, outcomes and `message.raw_message.redelivered`. `drop_first_ack` makes the first `Outcome.ACK` for that queue a no-op, which simulates an ack lost after commit. `stack_factory.start()/stop()` run the real app lifecycle (from Step 1's `stack` fixture). Stopping closes the AMQP connection, so RabbitMQ requeues every unacked delivery. The extender is used on purpose, because its side effect (adding days) is not naturally idempotent. Only the inbox prevents a double extension.
 
 - [ ] **Step 3: Implement handlers, `acking.py` and app.** Confirm against the installed FastStream version: the `AckPolicy.MANUAL` name; whether `RabbitMessage.reject` accepts `requeue` (if not, use `message.raw_message.reject(requeue=True)`); and `on_startup` runs before connect. The delivery-limit test must pass on the pinned RabbitMQ 4.3.x image.
 - [ ] **Step 4: Run — expect PASS**, then the whole suite: `uv run pytest -m "slow or not slow" -v`

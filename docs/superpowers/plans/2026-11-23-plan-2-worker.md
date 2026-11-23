@@ -109,7 +109,32 @@ async def test_failure_records_attempt_and_backs_off(relay_factory, psvc, clock)
 async def test_one_failing_event_does_not_block_others(...):
     # one payment.failed + one payment.succeeded; FailingPublisher(fail_types={PAYMENT_FAILED}) -> returns 1
 async def test_publishes_in_created_at_order(...): ...
+
+async def test_commit_failure_after_publish_republishes_same_event_id(session_factory, psvc, clock):
+    # crash window: broker confirmed, DB commit of published_at lost
+    pay = await psvc.record(CMD)
+    pub = RecordingPublisher()
+
+    class CommitFailsOnce(UnitOfWork):
+        async def commit(self) -> None:
+            raise OperationalError("commit", {}, Exception("connection lost"))
+
+    crashing = OutboxRelay(lambda: CommitFailsOnce(session_factory), pub, clock, batch_size=10, max_backoff_s=60)
+    with pytest.raises(OperationalError):
+        await crashing.run_once()
+    assert len(pub.published) == 1                                  # it did reach the broker
+    ev = (await psvc.get_status(pay.view.payment_id)).event
+    assert (ev.published, ev.attempts) == (False, 0)                # marking was rolled back; row still pending
+
+    healthy = OutboxRelay(lambda: UnitOfWork(session_factory), pub, clock, batch_size=10, max_backoff_s=60)
+    assert await healthy.run_once() == 1
+    assert len(pub.published) == 2
+    assert pub.published[0].event_id == pub.published[1].event_id == ev.event_id   # same id -> consumers can dedup
+    assert pub.published[0] == pub.published[1]                     # byte-identical envelope (same occurred_at, payload)
+    assert (await psvc.get_status(pay.view.payment_id)).event.published is True
 ```
+
+This test pins the at-least-once contract on the producer side. A duplicate is allowed, but it must carry the **same** `event_id`, which is what makes the consumers' inbox dedup work. If an implementation minted a fresh id on retry, or let the commit error escape per-row handling and silently drop the row, this test fails. Note that the commit error propagates out of `run_once()`: it is a whole-batch failure, not a per-row publish failure. `run_periodic` (Task 10) logs it and retries on the next tick.
 
 - [ ] **Step 2: Run — expect FAIL**
 - [ ] **Step 3: Implement `backoff_delay` and `OutboxRelay`**. Catch `Exception` per row (not bare `except`), log it with `event_id`, and keep going.
