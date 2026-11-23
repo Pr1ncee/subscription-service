@@ -9,6 +9,7 @@ from sqlalchemy.pool import NullPool
 from testcontainers.community.postgres import PostgresContainer
 
 from subscriptions_service.db.engine import create_session_factory
+from subscriptions_service.repositories.uow import UnitOfWork, UnitOfWorkFactory
 from tests.fakes import FakeClock
 from tests.support import alembic_config
 
@@ -35,3 +36,8 @@ async def session_factory(pg_url: str) -> AsyncIterator[async_sessionmaker[Async
 @pytest.fixture
 def clock() -> FakeClock:
     return FakeClock(datetime(2026, 1, 1, 12, tzinfo=UTC))
+
+
+@pytest.fixture
+def uow_factory(session_factory: async_sessionmaker[AsyncSession]) -> UnitOfWorkFactory:
+    return lambda: UnitOfWork(session_factory)
