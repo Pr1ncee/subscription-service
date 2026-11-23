@@ -1,0 +1,92 @@
+name: subscriptions-service
+
+x-app: &app
+  image: ${IMAGE:-subscriptions-service:local}
+  build: .
+  env_file: .env.example
+  deploy:
+    resources:
+      limits:
+        cpus: "0.5"
+        memory: 256M
+
+x-needs-db-and-broker: &needs-db-and-broker
+  migrate:
+    condition: service_completed_successfully
+  rabbitmq:
+    condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: subscriptions
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d subscriptions"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  rabbitmq:
+    # Same exact tag as RABBITMQ_IMAGE in tests/conftest.py (delivery-limit semantics changed in 4.3).
+    image: rabbitmq:4.3.8-management-alpine
+    hostname: rabbitmq  # node name must be stable for the data volume to be reused
+    environment:
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: app
+    ports:
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    volumes:
+      # Persist exchanges, queues and bindings: a broker restart must not lose topology.
+      - rabbitmq-data:/var/lib/rabbitmq
+
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "subscriptions_service.worker"]
+    depends_on: *needs-db-and-broker
+    restart: unless-stopped
+    stop_grace_period: 15s  # > PUBLISH_TIMEOUT_S, so an in-flight batch can finish
+
+  consumers:
+    <<: *app
+    command: ["python", "-m", "subscriptions_service.consumers"]
+    depends_on: *needs-db-and-broker
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  rabbitmq-data:
