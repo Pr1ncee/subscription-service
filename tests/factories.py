@@ -3,8 +3,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from subscriptions_service.db.tables import NotificationRow, PaymentRow, SubscriptionRow
+from subscriptions_service.domain.enums import PaymentStatus
+from subscriptions_service.services.dto import RecordPaymentCommand
 
 BASE_TIME = datetime(2026, 1, 1, 12, tzinfo=UTC)
+CMD = RecordPaymentCommand("s1", "pp-1", Decimal("10.00"), "USD", PaymentStatus.SUCCEEDED)
 
 
 def make_subscription(

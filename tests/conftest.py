@@ -1,5 +1,5 @@
 from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -14,6 +14,7 @@ from subscriptions_service.api.deps import get_clock, get_session_factory
 from subscriptions_service.config import Settings
 from subscriptions_service.db.engine import create_session_factory
 from subscriptions_service.repositories.uow import UnitOfWork, UnitOfWorkFactory
+from subscriptions_service.services.payments import PaymentService
 from subscriptions_service.services.subscriptions import SubscriptionService
 from tests.fakes import FakeClock
 from tests.support import alembic_config
@@ -51,6 +52,15 @@ def uow_factory(session_factory: async_sessionmaker[AsyncSession]) -> UnitOfWork
 @pytest.fixture
 def subs(uow_factory: UnitOfWorkFactory, clock: FakeClock) -> SubscriptionService:
     return SubscriptionService(uow_factory, clock, [3, 1, 0])
+
+
+@pytest.fixture
+async def psvc(
+    uow_factory: UnitOfWorkFactory, clock: FakeClock, subs: SubscriptionService
+) -> PaymentService:
+    """Payment service with subscription `s1` (day_count 30) already created."""
+    await subs.upsert("s1", "u1", 30, clock.now() + timedelta(days=10))
+    return PaymentService(uow_factory, clock)
 
 
 UNREACHABLE_BROKER = "amqp://guest:guest@127.0.0.1:1/"

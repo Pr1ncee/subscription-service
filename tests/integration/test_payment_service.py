@@ -11,22 +11,12 @@ from subscriptions_service.domain.enums import PaymentStatus
 from subscriptions_service.domain.errors import ConflictError, NotFoundError
 from subscriptions_service.repositories.outbox import OutboxRepository
 from subscriptions_service.repositories.uow import UnitOfWorkFactory
-from subscriptions_service.services.dto import RecordPaymentCommand
 from subscriptions_service.services.payments import PaymentService
 from subscriptions_service.services.subscriptions import SubscriptionService
-from tests.factories import make_notification
+from tests.factories import CMD, make_notification
 from tests.fakes import FakeClock
 
 D = timedelta(days=1)
-CMD = RecordPaymentCommand("s1", "pp-1", Decimal("10.00"), "USD", PaymentStatus.SUCCEEDED)
-
-
-@pytest.fixture
-async def psvc(
-    uow_factory: UnitOfWorkFactory, clock: FakeClock, subs: SubscriptionService
-) -> PaymentService:
-    await subs.upsert("s1", "u1", 30, clock.now() + 10 * D)
-    return PaymentService(uow_factory, clock)
 
 
 async def _outbox_count(uow_factory: UnitOfWorkFactory, clock: FakeClock) -> int:
