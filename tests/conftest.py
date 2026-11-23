@@ -10,6 +10,7 @@ from testcontainers.community.postgres import PostgresContainer
 
 from subscriptions_service.db.engine import create_session_factory
 from subscriptions_service.repositories.uow import UnitOfWork, UnitOfWorkFactory
+from subscriptions_service.services.subscriptions import SubscriptionService
 from tests.fakes import FakeClock
 from tests.support import alembic_config
 
@@ -41,3 +42,8 @@ def clock() -> FakeClock:
 @pytest.fixture
 def uow_factory(session_factory: async_sessionmaker[AsyncSession]) -> UnitOfWorkFactory:
     return lambda: UnitOfWork(session_factory)
+
+
+@pytest.fixture
+def subs(uow_factory: UnitOfWorkFactory, clock: FakeClock) -> SubscriptionService:
+    return SubscriptionService(uow_factory, clock, [3, 1, 0])
