@@ -16,7 +16,10 @@
 
 - Everything in Plan 1 → Global Constraints and "Conventions from the skills".
 - Exchange `events` (topic, durable); DLX `events.dlx` (fanout, durable) → queue `events.dlq`.
-- Queues (quorum, durable, `x-delivery-limit=CONSUMER_DELIVERY_LIMIT`, `x-dead-letter-exchange=events.dlx`): `payments.notify` ← `payment.*`; `payments.extend-subscription` ← `payment.succeeded`; `notifications.send` ← `notification.due`.
+- Queues (quorum, durable, `x-delivery-limit=CONSUMER_DELIVERY_LIMIT`, `x-dead-letter-exchange=events.dlx`, `x-dead-letter-strategy=at-least-once`, `x-overflow=reject-publish`): `payments.notify` ← `payment.*`; `payments.extend-subscription` ← `payment.succeeded`; `notifications.send` ← `notification.due`. RabbitMQ's default dead-letter transfer is at-most-once; the `at-least-once` strategy (which requires `reject-publish` overflow) keeps a message in the source queue until the DLQ has confirmed it.
+- `events.dlq`: quorum, durable, `x-delivery-limit=-1` (unlimited). Quorum queues default to 20 in 4.x, and a DLQ message dropped past that limit would be lost for good.
+- RabbitMQ image pinned to one exact `4.3.x` tag (`RABBITMQ_IMAGE` constant in `tests/conftest.py`, same tag in compose). Tests and compose must run the same broker version, because delivery-limit semantics changed in 4.3.
+- Every process **connects before declaring** topology (declarations need an open channel).
 - Message: body = `EventEnvelope.to_json()`, `message_id = str(event_id)`, `routing_key = event_type`, persistent, `content_type="application/json"`, publisher confirms on, `mandatory=True`.
 - Relay: `attempts += 1` on every try. Failure sets `last_error` and `next_attempt_at = now + backoff_delay(attempts)`, where `backoff_delay = min(max_backoff_s, 0.5 * 2 ** (attempts - 1))` seconds. Rows are never deleted.
 
@@ -119,12 +122,12 @@ async def test_publishes_in_created_at_order(...): ...
 
 **Files:**
 - Create: `adapters/rabbit_topology.py`, `adapters/rabbit_publisher.py`, `worker/loop.py`, `worker/main.py`, `worker/__main__.py`
-- Modify: `tests/conftest.py`. Add `rabbit_url` (session-scoped `RabbitMqContainer("rabbitmq:4-management-alpine")`, started lazily) and `rabbit_broker` (function-scoped: `RabbitBroker(rabbit_url)` connected, all project queues deleted on teardown so different `x-delivery-limit` values don't collide).
+- Modify: `tests/conftest.py`. Add `rabbit_url` (session-scoped `RabbitMqContainer(RABBITMQ_IMAGE)` with `RABBITMQ_IMAGE = "rabbitmq:4.3.<patch>-management-alpine"`. Pin the exact patch tag current when you write it, and use the same tag in compose. Started lazily.) and `rabbit_broker` (function-scoped: `RabbitBroker(rabbit_url)` connected, all project queues deleted on teardown so different `x-delivery-limit` values don't collide).
 - Test: `tests/unit/test_loop.py`, `tests/integration/test_rabbit_publisher.py`
 
 **Interfaces:**
 - Produces:
-  - `rabbit_topology.py`: `EVENTS_EXCHANGE: RabbitExchange`, `DEAD_LETTER_EXCHANGE: RabbitExchange`, `QueueSpec(name: str, routing_keys: tuple[str, ...])`, `QUEUE_SPECS: tuple[QueueSpec, ...]` (the three from Global Constraints), `DLQ_NAME = "events.dlq"`, `rabbit_queue(spec: QueueSpec, delivery_limit: int) -> RabbitQueue` (quorum, durable, args), `dead_letter_queue() -> RabbitQueue`, `async declare_topology(broker: RabbitBroker, delivery_limit: int) -> None`. It declares both exchanges and all queues, then binds each queue with `await (await broker.declare_queue(q)).bind(exchange, routing_key)`. Idempotent.
+  - `rabbit_topology.py`: `EVENTS_EXCHANGE: RabbitExchange`, `DEAD_LETTER_EXCHANGE: RabbitExchange`, `QueueSpec(name: str, routing_keys: tuple[str, ...])`, `QUEUE_SPECS: tuple[QueueSpec, ...]` (the three from Global Constraints), `DLQ_NAME = "events.dlq"`, `rabbit_queue(spec: QueueSpec, delivery_limit: int) -> RabbitQueue` (quorum, durable, the five arguments from Global Constraints), `dead_letter_queue() -> RabbitQueue` (quorum, durable, `x-delivery-limit=-1`). The same functions are used by the consumers' subscribers, so the arguments always match and a redeclare never fails with `PRECONDITION_FAILED`. `async declare_topology(broker: RabbitBroker, delivery_limit: int) -> None`. It declares both exchanges and all queues, then binds each queue with `await (await broker.declare_queue(q)).bind(exchange, routing_key)`. Idempotent.
   - `RabbitPublisher(broker: RabbitBroker, timeout_s: float)` implements `EventPublisher`. It wraps `broker.publish(..., exchange=EVENTS_EXCHANGE, mandatory=True, persist=True, message_id=..., timeout=...)` in `asyncio.timeout(timeout_s)`, and an unroutable return raises.
   - `run_periodic(step: Callable[[], Awaitable[int]], *, interval_s: float, name: str, stop: asyncio.Event) -> None`. If `step()` returns > 0 it calls again immediately; otherwise it waits `interval_s` or until `stop` is set. Exceptions are logged with `logger.exception` and the loop continues.
   - `run_worker(settings: Settings) -> None` (composition root). It builds the engine, session factory, `SystemClock` and `RabbitBroker(settings.rabbitmq_url)`, connects, calls `declare_topology`, then runs scheduler and relay `run_periodic` in an `asyncio.TaskGroup`. SIGTERM/SIGINT set `stop`. `__main__.py`: `asyncio.run(run_worker(Settings()))`.
@@ -154,6 +157,12 @@ async def test_event_retained_without_consumers(rabbit_broker):          # Revie
     for name in ("payments.notify", "payments.extend-subscription"):
         msg = await (await rabbit_broker.declare_queue(RabbitQueue(name, passive=True))).get(timeout=5)
         assert msg.message_id == str(env.event_id) and EventEnvelope.from_json(msg.body) == env
+
+async def test_queue_arguments_declared(rabbit_broker):
+    await declare_topology(rabbit_broker, delivery_limit=5)
+    # via the management HTTP API (container port 15672) GET /api/queues/%2F/notifications.send:
+    # arguments include x-queue-type=quorum, x-delivery-limit=5, x-dead-letter-strategy=at-least-once,
+    # x-overflow=reject-publish; events.dlq has x-delivery-limit=-1
 
 async def test_unroutable_publish_raises(rabbit_broker):
     # declare only EVENTS_EXCHANGE (no queues) -> publish raises

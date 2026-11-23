@@ -18,7 +18,8 @@
 - All timestamps `timestamptz` UTC; API accepts only timezone-aware datetimes (naive → `422`).
 - `REMINDER_OFFSETS_DAYS` default `3,1,0`; offset `0` → `subscription.expired`, others → `subscription.expiring`; only slots strictly in the future are scheduled.
 - Expiry never moves backwards: update sets `expected_expires_on = max(current, requested)`.
-- Payment extension: `expected_expires_on = max(expected_expires_on, now) + day_count days`.
+- Payment extension: `expected_expires_on = max(expected_expires_on, now) + period_days days`, where `period_days` is the subscription's `day_count` **snapshotted onto the payment when it is recorded** (column `payments.period_days`, carried in the event payload).
+- Lock order is **subscription → notification** in every transaction that touches both.
 - `amount` `numeric(19,4)`, `> 0`; `currency` matches `^[A-Z]{3}$`; payment `status` ∈ `succeeded|failed`.
 - `PUT /subscriptions/{id}` → `201` created / `200` updated; `user_id` mismatch → `409`; unknown subscription on GET or payment → `404`.
 - `POST /payments` duplicate `provider_payment`: identical payload → `200` existing, different payload → `409`.
@@ -110,6 +111,7 @@ check:     lint typecheck test
 ```toml
 [tool.importlinter]
 root_package = "subscriptions_service"
+include_external_packages = true   # required for the forbidden contracts below to check fastapi/sqlalchemy/etc.
 
 [[tool.importlinter.contracts]]
 name = "Layers"
@@ -160,7 +162,14 @@ def test_negative_offset_rejected(monkeypatch):  # REMINDER_OFFSETS_DAYS="3,-1"
 def test_import_contracts_hold():
     result = subprocess.run(["lint-imports"], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout
+
+def test_forbidden_contract_actually_bites(tmp_path):
+    # copy src/ to tmp_path, append "import fastapi" to domain/__init__.py,
+    # run lint-imports with cwd=tmp_path and PYTHONPATH=tmp_path/src
+    assert result.returncode != 0
+    assert "Inner layers are framework- and config-free BROKEN" in result.stdout
 ```
+(The second test proves the external-package rules are live, not silently ignored.)
 
 - [ ] **Step 3: Run — expect FAIL** (`ImportError: Settings`)
 
@@ -289,7 +298,7 @@ async def test_one_result_notification_per_payment(session_factory):
 
 **Interfaces:**
 - Produces (all methods `async`, each repo constructed with an `AsyncSession`):
-  - `SubscriptionRepository`: `get(subscription_id: str) -> SubscriptionRow | None`; `get_for_update(subscription_id: str) -> SubscriptionRow | None`; `insert_if_absent(row: SubscriptionRow) -> bool` (`ON CONFLICT DO NOTHING`, True if inserted)
+  - `SubscriptionRepository`: `get(subscription_id: str) -> SubscriptionRow | None`; `get_for_update(subscription_id: str) -> SubscriptionRow | None`; `get_for_share(subscription_id: str) -> SubscriptionRow | None` (`FOR SHARE`, used by notification delivery in Task 11); `insert_if_absent(row: SubscriptionRow) -> bool` (`ON CONFLICT DO NOTHING`, True if inserted)
   - `NotificationRepository`: `list_for_subscription(subscription_id: str) -> list[NotificationRow]` (order `scheduled_for, created_at`); `add_many(rows: Sequence[NotificationRow]) -> None`; `cancel_scheduled_reminders(subscription_id: str, now: datetime) -> int` (only `status='scheduled' AND payment_id IS NULL`); `insert_payment_notification(row: NotificationRow) -> bool` (`ON CONFLICT (payment_id) WHERE payment_id IS NOT NULL DO NOTHING`); `lock_due(now: datetime, limit: int) -> list[NotificationRow]` (`FOR UPDATE SKIP LOCKED`); `get_for_update(notification_id: UUID) -> NotificationRow | None`; `get_by_payment(payment_id: UUID) -> NotificationRow | None`
   - `PaymentRepository`: `insert_if_absent(row: PaymentRow) -> PaymentRow | None` (`ON CONFLICT (provider_payment) DO NOTHING RETURNING`); `get(payment_id: UUID) -> PaymentRow | None`; `get_by_provider(provider_payment: str) -> PaymentRow | None`
   - `OutboxRepository`: `add(envelope: EventEnvelope, aggregate_type: str, aggregate_id: str) -> None`; `lock_pending(now: datetime, limit: int) -> list[OutboxRow]` (`published_at IS NULL AND next_attempt_at <= now ORDER BY created_at FOR UPDATE SKIP LOCKED`); `get_for_aggregate(aggregate_type: str, aggregate_id: str) -> OutboxRow | None`
@@ -383,10 +392,11 @@ async def test_concurrent_creates_produce_one_subscription(svc, clock):
 
 **Interfaces:**
 - Produces:
-  - DTOs: `RecordPaymentCommand(subscription_id: str, provider_payment: str, amount: Decimal, currency: str, status: PaymentStatus)`; `PaymentView(payment_id: UUID, subscription_id, provider_payment, amount: Decimal, currency, status: PaymentStatus, created_at: datetime)`; `RecordPaymentResult(view: PaymentView, created: bool)`; `EventDeliveryView(event_id: UUID, event_type: str, published_at: datetime | None, attempts: int, last_error: str | None)` with property `published -> bool`; `NotificationDeliveryView(status: NotificationStatus, sent_at: datetime | None)`; `PaymentStatusView(payment: PaymentView, event: EventDeliveryView, notification: NotificationDeliveryView | None)`
+  - DTOs: `RecordPaymentCommand(subscription_id: str, provider_payment: str, amount: Decimal, currency: str, status: PaymentStatus)`; `PaymentView(payment_id: UUID, subscription_id, provider_payment, amount: Decimal, currency, status: PaymentStatus, period_days: int, created_at: datetime)`; `RecordPaymentResult(view: PaymentView, created: bool)`; `EventDeliveryView(event_id: UUID, event_type: str, published_at: datetime | None, attempts: int, last_error: str | None)` with property `published -> bool`; `NotificationDeliveryView(status: NotificationStatus, sent_at: datetime | None)`; `PaymentStatusView(payment: PaymentView, event: EventDeliveryView, notification: NotificationDeliveryView | None)`
   - `PaymentService(uow_factory: UnitOfWorkFactory, clock: Clock)`: `record(cmd: RecordPaymentCommand) -> RecordPaymentResult`; `get_status(payment_id: UUID) -> PaymentStatusView`; `get_status_by_provider(provider_payment: str) -> PaymentStatusView` (both raise `NotFoundError`).
-  - Outbox event: `aggregate_type="payment"`, `aggregate_id=str(payment_id)`, `event_type=payment.<status>`, payload `{"payment_id", "subscription_id", "provider_payment", "amount", "currency", "status"}` — all strings; `amount` = `str(amount.quantize(Decimal("0.0001")))`.
-  - Identical-duplicate rule: same `subscription_id`, `currency`, `status`, and `Decimal` equality of `amount` (so `10 == 10.00`).
+  - Outbox event: `aggregate_type="payment"`, `aggregate_id=str(payment_id)`, `event_type=payment.<status>`, payload `{"payment_id", "subscription_id", "provider_payment", "amount", "currency", "status", "period_days"}` — all strings except `period_days: int`; `amount` = `str(amount.quantize(Decimal("0.0001")))`.
+  - `period_days` = the subscription's `day_count` read in the same transaction, stored on `payments.period_days` (Task 3 table gets this column, `CHECK (period_days > 0)`).
+  - Identical-duplicate rule: same `subscription_id`, `currency`, `status`, and `Decimal` equality of `amount` (so `10 == 10.00`). `period_days` is **not** compared, because the client never sends it.
 
 - [ ] **Step 1: Write failing tests** (fixture creates subscription `s1` via `SubscriptionService`)
 
@@ -398,7 +408,12 @@ async def test_record_writes_payment_and_outbox_event(psvc):
     status = await psvc.get_status(res.view.payment_id)
     assert res.created and status.event.event_type == "payment.succeeded"
     assert status.event.published is False and status.event.attempts == 0 and status.notification is None
-    # and the outbox payload["amount"] == "10.0000"
+    # and the outbox payload["amount"] == "10.0000", payload["period_days"] == 30 == res.view.period_days
+
+async def test_period_is_snapshotted_at_record_time(psvc, subs, clock):
+    res = await psvc.record(CMD)                                   # s1 has day_count 30
+    await subs.upsert("s1", "u1", 60, clock.now() + 10 * D)        # later PUT changes the period
+    assert (await psvc.get_status(res.view.payment_id)).payment.period_days == 30
 
 async def test_outbox_failure_rolls_back_payment(psvc, monkeypatch):
     monkeypatch.setattr(OutboxRepository, "add", AsyncMock(side_effect=RuntimeError("db down")))

@@ -53,7 +53,7 @@ full hexagonal with DI container rejected as too ceremonial for the scope.
 
 ## 4. Domain decisions (made by the requester)
 
-- **`day_count`** = billing period length in days. A successful payment extends the subscription by `day_count` days.
+- **`day_count`** = billing period length in days. A successful payment extends the subscription by the period **captured when the payment was recorded** (`payments.period_days`, copied from the subscription's `day_count` at that moment and carried in the event). A later `PUT` that changes `day_count` cannot change what an already-recorded payment bought.
 - **Reminders** are scheduled at configurable offsets before `expected_expires_on`.
   Default `REMINDER_OFFSETS_DAYS = [3, 1, 0]` → events `subscription.expiring` (3d, 1d) and `subscription.expired` (0d).
   Offsets already in the past at scheduling time are skipped.
@@ -93,17 +93,19 @@ All three processes are entrypoints of one Python package and one Docker image.
 1. **Write side**: the API writes business rows and an `outbox` row in the same transaction. No broker call from the API.
 2. **Relay**: loop — `SELECT … FROM outbox WHERE published_at IS NULL AND next_attempt_at <= now() ORDER BY created_at LIMIT :batch FOR UPDATE SKIP LOCKED`; publish each with publisher confirms, persistent delivery mode, `message_id = outbox.id`; set `published_at`. On publish failure: `attempts += 1`, `last_error`, `next_attempt_at = now() + backoff(attempts)` (exponential, capped). Rows are never dropped.
 3. **At-least-once**: a crash between publish-confirm and commit re-publishes → consumers must dedup.
-4. **Consumers**: each handler opens a DB tx, `INSERT INTO processed_events(consumer, event_id) ON CONFLICT DO NOTHING`; if no row inserted → ack and skip; else apply side effects and commit; ack after commit. Unhandled error → nack; quorum queue `x-delivery-limit` (default 5) then dead-letter to `events.dlq`.
+4. **Consumers**: each handler opens a DB tx, `INSERT INTO processed_events(consumer, event_id) ON CONFLICT DO NOTHING`; if no row inserted → ack and skip; else apply side effects and commit; ack after commit. Unhandled error → **`basic.reject(requeue=True)`** — not `basic.nack`. Since RabbitMQ 4.3, requeued nacks no longer count toward the quorum-queue delivery limit; reject counts on every version. After `x-delivery-limit` (default 5) the message is dead-lettered to `events.dlq`. Dead-lettering uses the quorum `at-least-once` strategy, so a message can't be lost on its way to the DLQ.
 5. **Ordering**: not guaranteed across relay instances; consumers do not rely on it (extension and notification creation are per-event idempotent and commutative enough — see 7.3).
 
-### 5.2 RabbitMQ topology (declared idempotently by both worker and consumers on startup — so events published before any consumer ran are routed, not dropped)
+### 5.2 RabbitMQ topology (declared idempotently by both worker and consumers on startup — so events published before any consumer ran are routed, not dropped; each process connects first, then declares)
 
 - Exchange `events` (topic, durable). DLX `events.dlx` (fanout) → queue `events.dlq`.
-- Queues (quorum, durable, `x-delivery-limit=5`, DLX `events.dlx`):
+- Queues (quorum, durable, `x-delivery-limit=5`, `x-dead-letter-exchange=events.dlx`, `x-dead-letter-strategy=at-least-once`, `x-overflow=reject-publish` — the overflow setting is required by the at-least-once strategy):
   - `payments.notify` ← `payment.*`
   - `payments.extend-subscription` ← `payment.succeeded`
   - `notifications.send` ← `notification.due`
-- **dlq-handler** consumer on `events.dlq`: logs every dead-lettered event; for `notification.due` it marks the notification `failed` with `last_error` (idempotent: only from `queued`). Ensures no notification sits in `queued` forever and endpoint 4 reports the failure. Messages stay inspectable in the log; replay tooling is future work.
+- `events.dlq`: quorum, durable, `x-delivery-limit=-1`. The limit is switched off on purpose, because quorum queues in 4.x default to a limit of 20, and a dead letter with no DLX would be silently dropped after 20 failed handling attempts.
+- **dlq-handler** consumer on `events.dlq`: logs every dead-lettered event; for `notification.due` it marks the notification `failed` with `last_error` (idempotent: only from `queued`). It acks **only after that DB write commits**. On any error (e.g. Postgres down) it waits briefly and `reject(requeue=True)`s, so a dead letter is retried until it is recorded and never discarded. This ensures no notification sits in `queued` forever and endpoint 4 reports the failure. Replay tooling is future work.
+- RabbitMQ version is pinned to the same exact `4.3.x` image in compose and in testcontainers.
 - Message: JSON envelope `{event_id, event_type, occurred_at, payload}`; `message_id = event_id`.
 
 ## 6. Data model (PostgreSQL)
@@ -144,6 +146,7 @@ Indexes: partial `(scheduled_for) WHERE status='scheduled'`; `(subscription_id, 
 | amount | numeric(19,4), > 0 | |
 | currency | char(3) | ISO-4217 uppercase |
 | status | text | `succeeded` / `failed` |
+| period_days | int not null, > 0 | snapshot of the subscription's `day_count` at record time — what this payment buys |
 | created_at | timestamptz | |
 
 **outbox**
@@ -181,13 +184,15 @@ One tx: subscription must exist (404). `INSERT … ON CONFLICT (provider_payment
 
 Consumers:
 - **payment-notifier** (`payment.*`): inbox dedup; insert notification `{event_name=payment.<status>, payment_id, scheduled_for=now(), status=scheduled}` (unique on payment_id makes it idempotent too). The scheduler then picks it up like any other — one sending path.
-- **subscription-extender** (`payment.succeeded`): inbox dedup; `SELECT subscription FOR UPDATE`; `expected_expires_on = max(expected_expires_on, now()) + day_count days`; cancel pending reminders; schedule new ones (same service function as 7.1).
+- **subscription-extender** (`payment.succeeded`): inbox dedup; `SELECT subscription FOR UPDATE`; `expected_expires_on = max(expected_expires_on, now()) + payload.period_days days`. It does **not** use the subscription's current `day_count`. Then it cancels pending reminders and schedules new ones (same service function as 7.1).
+
+The payment event payload is `{payment_id, subscription_id, provider_payment, amount, currency, status, period_days}`. The identical-duplicate check in `POST /payments` ignores `period_days`, because the client does not send it.
 
 ### 7.4 Scheduler (worker)
 Loop: `SELECT notifications WHERE status='scheduled' AND scheduled_for <= now() ORDER BY scheduled_for LIMIT :batch FOR UPDATE SKIP LOCKED`; in the same tx set `status='queued'` and insert outbox `notification.due {notification_id}`.
 
 ### 7.5 notification-sender (consumer)
-Inbox dedup; `SELECT notification FOR UPDATE`; if status ≠ `queued` → skip (already sent/cancelled). For reminders, if `target_expires_on` ≠ subscription's current `expected_expires_on` → mark `cancelled` (stale: subscription was extended after queuing) and do not send. Call `NotificationSender.send(notification, subscription)`; set `status='sent'`, `sent_at=now()`; commit. If sender raises a permanent error → `failed`; transient → raise (redelivery). Crash after send but before commit → possible duplicate send (documented at-least-once).
+**Lock order is subscription → notification everywhere.** Here that means: inbox dedup; `SELECT subscription FOR SHARE`, then `SELECT notification FOR UPDATE`. The extender holds the subscription `FOR UPDATE`, so it cannot commit an extension between this handler's expiry check and its send. It waits, and the reminder is judged against a consistent expiry. The scheduler never locks subscriptions, so no lock cycle exists. If status ≠ `queued` → skip (already sent/cancelled). For reminders, if `target_expires_on` ≠ subscription's current `expected_expires_on` → mark `cancelled` (stale: subscription was extended after queuing) and do not send. Call `NotificationSender.send(notification, subscription)`; set `status='sent'`, `sent_at=now()`; commit. If sender raises a permanent error → `failed`; transient → raise (redelivery). Crash after send but before commit → possible duplicate send (documented at-least-once).
 
 ### 7.6 `GET /payments/{payment_id}` (and `GET /payments?provider_payment=…`)
 Response:
@@ -233,7 +238,9 @@ Delivery tooling: multi-stage non-root Docker image (pinned bases), docker compo
 - **Unit**: reminder-schedule calculation, extension calculation, envelope serialization.
 - **Integration (real Postgres)**: each service; payment idempotency (200/409); atomicity — force failure on outbox insert → no payment row; scheduler `SKIP LOCKED` with two concurrent workers doesn't double-queue; re-upsert cancels pending.
 - **Integration (Postgres + RabbitMQ)**: relay publishes and marks; **broker down → POST /payments still 201, outbox pending; broker up → published**; consumer receives duplicate message → side effect applied once; stale queued reminder after extension → `cancelled`, not sent; notification message exceeding delivery limit → notification `failed`.
-- **Rules**: PUT with older expiry after an extension keeps the later expiry; payment for unknown subscription → 404.
+- **Rules**: PUT with older expiry after an extension keeps the later expiry; payment for unknown subscription → 404; a PUT changing `day_count` after a payment was recorded doesn't change that payment's extension.
+- **Concurrency**: interleaved test where the sender is blocked mid-send while an extension is attempted — the extension must wait for the delivery tx.
+- **Broker semantics**: delivery-limit exhaustion on the pinned RabbitMQ 4.3.x; DLQ handler with Postgres unavailable keeps the dead letter and records it after recovery.
 - **Priority if time runs short**: guarantee-critical tests first; the compose E2E test and the `outbox-checklist` skill are the first to trim.
 - **E2E (compose-level, one happy path)**: PUT subscription → POST payment succeeded → poll GET payment until `event.published` and `notification.status=sent`, and subscription extended.
 

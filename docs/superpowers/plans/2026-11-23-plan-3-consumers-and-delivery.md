@@ -16,8 +16,16 @@
 
 - Everything in Plans 1–2 → Global Constraints.
 - Consumer names (inbox keys): `payment-notifier`, `subscription-extender`, `notification-sender`.
-- Handlers use `AckPolicy.NACK_ON_ERROR` (requeue → quorum `x-delivery-limit` counts → dead-letter). A malformed envelope raises `RejectMessage` and goes straight to the DLQ. The DLQ subscriber uses `AckPolicy.REJECT_ON_ERROR` so a bug there cannot loop forever.
+- **Acknowledgement policy (all subscribers): `AckPolicy.MANUAL`.**
+  - Success → `await message.ack()`, only after the DB transaction commits.
+  - Retryable failure → `basic.reject(requeue=True)`, **never `basic.nack`**. Since RabbitMQ 4.3, a requeued nack does not increment `x-delivery-count`, so the delivery limit would never be reached. Use FastStream's `message.reject(requeue=True)` if the installed version exposes `requeue`; otherwise call the underlying aio-pika message (`message.raw_message.reject(requeue=True)`).
+  - A malformed envelope → `reject(requeue=False)`, which goes straight to the DLQ.
+  - The whole policy lives in one helper, `consumers/acking.py::settle(message, outcome)`, so every handler acks the same way.
+- **DLQ subscriber:** it is also manual. Ack only after `DeadLetterHandler` commits. On any exception (e.g. Postgres down) it logs, sleeps `DLQ_RETRY_DELAY_S = 1.0`, then `reject(requeue=True)`. With `x-delivery-limit=-1` on `events.dlq` a dead letter is retried until recorded, never discarded. An undecodable body is logged and acked, because there is nothing to record.
+- **Startup order:** consumers `on_startup` does `await broker.connect()` and **then** `declare_topology(...)`. FastStream runs `on_startup` *before* it connects the broker, and declarations need a channel. Subscribers' `RabbitQueue`s come from the same `rabbit_queue()`/`dead_letter_queue()` functions, so their arguments match.
+- **Lock order subscription → notification:** `NotificationDelivery` locks the subscription `FOR SHARE` *before* locking the notification `FOR UPDATE`. `SubscriptionExtender` locks the subscription `FOR UPDATE`, then touches notifications. An extension therefore cannot commit between the stale check and the send.
 - Notification-sender stale rule: for a reminder, `target_expires_on != subscription.expected_expires_on` → `cancelled`, not sent.
+- Extension length comes from the event's `payload["period_days"]`, never from the subscription's current `day_count`.
 - `PermanentSendError` → `failed` with `last_error`, committed. Any other exception propagates, the whole tx rolls back (including the inbox row), and the message is redelivered.
 - Container rules (from the deployment-patterns skill):
   - multi-stage build
@@ -56,8 +64,8 @@ Migrations must stay backward-compatible with the previous image (expand → mig
 - Consumes: `reschedule_reminders` (Task 5), `extend_expiry` (Task 2), repositories (Task 4), scheduler (Task 8, for test setup).
 - Produces (each with `CONSUMER_NAME: ClassVar[str]` and `async handle(envelope: EventEnvelope) -> None`):
   - `PaymentResultNotifier(uow_factory, clock)`: inbox check, then `insert_payment_notification(event_name=payment.<status>, payment_id, scheduled_for=now, status=scheduled)`
-  - `SubscriptionExtender(uow_factory, clock, reminder_offsets_days)`: inbox check, then `get_for_update` → `extend_expiry` → `reschedule_reminders`
-  - `NotificationDelivery(uow_factory, clock, sender: NotificationSender)`: as spec §7.5 + Global Constraints
+  - `SubscriptionExtender(uow_factory, clock, reminder_offsets_days)`: inbox check, then `get_for_update` → `extend_expiry(current, int(payload["period_days"]), now)` → `reschedule_reminders`
+  - `NotificationDelivery(uow_factory, clock, sender: NotificationSender)`: as spec §7.5 + Global Constraints. It needs a new repository method from Task 4: `SubscriptionRepository.get_for_share(subscription_id: str) -> SubscriptionRow | None` (`SELECT … FOR SHARE`). Order: inbox → get the notification's `subscription_id` (plain read) → `subscriptions.get_for_share` → `notifications.get_for_update` → re-check status → stale check → send → mark.
   - `DeadLetterHandler(uow_factory, clock)`: `async handle(envelope: EventEnvelope, reason: str) -> None`. Logs at ERROR. For `notification.due`, if the row is `queued` it sets `failed` with `last_error=f"dead-lettered: {reason}"`.
 
 - [ ] **Step 1: Write failing tests**
@@ -76,6 +84,19 @@ async def test_extender_applies_once_per_payment(extender, payment_env, subs, cl
     view = await subs.get("s1")
     assert view.expected_expires_on == clock.now() + 35 * D
     assert Counter(n.status for n in view.notifications) == {"cancelled": 3, "scheduled": 3}
+
+async def test_extender_uses_period_from_event_not_current_day_count(...):
+    # payment recorded while day_count=30 (payload period_days=30); then PUT day_count=60; extender.handle -> + 30D, not 60D
+
+async def test_extension_waits_for_in_flight_delivery(delivery, extender, blocking_sender, ...):   # interleaved race
+    # blocking_sender.send awaits an asyncio.Event `release` and sets `entered` when called
+    t_deliver = asyncio.create_task(delivery.handle(reminder_due_env))
+    await blocking_sender.entered.wait()                    # delivery holds subscription FOR SHARE, inside send
+    t_extend = asyncio.create_task(extender.handle(payment_env))
+    await asyncio.sleep(0.3)
+    assert not t_extend.done()                              # extension blocked on the subscription lock
+    blocking_sender.release.set(); await asyncio.gather(t_deliver, t_extend)
+    # reminder status "sent" (it was valid when sent); expiry extended; new reminders scheduled for the new expiry
 
 async def test_extender_on_lapsed_subscription_starts_from_now(...):   # exp = now - 10D -> now + 30D
 async def test_two_payments_extend_twice(...):                           # -> now + 65D
@@ -111,7 +132,7 @@ async def test_dead_letter_payment_event_only_logs(..., caplog): ...
 ### Task 12: FastStream consumers app
 
 **Files:**
-- Create: `consumers/handlers.py`, `consumers/app.py`, `consumers/__main__.py`
+- Create: `consumers/acking.py`, `consumers/handlers.py`, `consumers/app.py`, `consumers/__main__.py`
 - Test: `tests/integration/test_consumers_app.py` (Postgres + RabbitMQ)
 
 **Interfaces:**
@@ -119,9 +140,18 @@ async def test_dead_letter_payment_event_only_logs(..., caplog): ...
 - Produces:
   - `ConsumerServices(notifier, extender, delivery, dead_letters)` frozen dataclass
   - `register_handlers(broker: RabbitBroker, services: ConsumerServices, delivery_limit: int) -> None`. It registers one subscriber per queue on `EVENTS_EXCHANGE` plus one on `events.dlq`. A handler signature is `async (body: bytes, message: RabbitMessage) -> None`. Decoding uses `EventEnvelope.from_json`, and `InvalidEnvelopeError` → `raise RejectMessage() from e`. The DLQ handler reads its reason from the `x-first-death-reason` header (default `"unknown"`). For an undecodable DLQ body it only logs.
-  - `create_app(settings: Settings, *, sender: NotificationSender | None = None, clock: Clock | None = None) -> FastStream` (composition root; defaults `LoggingSender()`, `SystemClock()`). An `on_startup` hook calls `declare_topology`. `__main__.py`: `asyncio.run(create_app(Settings()).run())`.
+  - `consumers/acking.py`: `Outcome(StrEnum)` = `ACK | RETRY | DEAD_LETTER`; `async settle(message: RabbitMessage, outcome: Outcome) -> None`. It maps `ACK` → ack, `RETRY` → `reject(requeue=True)` and `DEAD_LETTER` → `reject(requeue=False)`, and never calls nack.
+  - `create_app(settings: Settings, *, sender: NotificationSender | None = None, clock: Clock | None = None, session_factory: async_sessionmaker | None = None) -> FastStream` is the composition root. Its defaults are `LoggingSender()`, `SystemClock()`, and a session factory built from settings. The `on_startup` hook does `await broker.connect()` → `await declare_topology(broker, settings.consumer_delivery_limit)`. `__main__.py`: `asyncio.run(create_app(Settings()).run())`.
 
-- [ ] **Step 1: Write failing tests** (fixture: start the app's broker in-process with `async with broker: await broker.start()`; `wait_until(predicate, timeout=10)` helper polls the DB)
+- [ ] **Step 1: Write failing tests**
+  - Fixture `stack`: run the **real app lifecycle**, not `broker.start()`. It starts `app.run()` in a background task (or FastStream's `TestApp` against the real broker if the installed version supports that), waits for `after_startup`, and cancels the task or calls `app.exit()` on teardown. This exercises `on_startup`.
+  - `wait_until(predicate, timeout=10)` helper polls the DB.
+
+```python
+async def test_app_startup_declares_topology_on_fresh_broker(stack_factory, rabbit_broker):
+    # broker has no queues declared beforehand; start the app via its lifecycle
+    # -> all three queues + events.dlq exist (passive declare succeeds) and the app is consuming
+```
 
 ```python
 async def test_payment_flow_through_broker(stack, subs, psvc, relay, sched, sender, clock):
@@ -145,7 +175,20 @@ async def test_delivery_limit_dead_letters_and_marks_failed(stack_with(delivery_
 ```
 
 - [ ] **Step 2: Run — expect FAIL** — `uv run pytest tests/integration/test_consumers_app.py -v`
-- [ ] **Step 3: Implement handlers and app.** Check the `AckPolicy` names against the installed FastStream version. In this setup, delivery-limit counting needs nack **with requeue**.
+  Two more tests go in the same file:
+
+```python
+async def test_dlq_handler_keeps_dead_letter_while_db_down(stack_with(session_factory=flaky_factory), ...):
+    # flaky_factory raises OperationalError for the first 3 sessions, then works
+    # dead-letter a notification.due: delivery_limit=1 and a sender that always raises RuntimeError
+    await wait_until(lambda: note_status == "failed", timeout=20)    # recorded after "recovery", not lost
+
+async def test_retry_uses_reject_not_nack(...):
+    # spy on settle(): with a transiently failing sender, every retry outcome is Outcome.RETRY
+    # and x-delivery-count on the redelivered message increases (assert >= 1 on the 2nd delivery)
+```
+
+- [ ] **Step 3: Implement handlers, `acking.py` and app.** Confirm against the installed FastStream version: the `AckPolicy.MANUAL` name; whether `RabbitMessage.reject` accepts `requeue` (if not, use `message.raw_message.reject(requeue=True)`); and `on_startup` runs before connect. The delivery-limit test must pass on the pinned RabbitMQ 4.3.x image.
 - [ ] **Step 4: Run — expect PASS**, then the whole suite: `uv run pytest -m "slow or not slow" -v`
 - [ ] **Step 5: Commit** — `feat(consumers): wire FastStream subscribers and dead-letter handling`
 
@@ -168,7 +211,7 @@ async def test_delivery_limit_dead_letters_and_marks_failed(stack_with(delivery_
 - `docker-compose.yml`:
   - **image and env:** app services use `image: ${IMAGE:-subscriptions-service:local}` plus `build: .`, so CI can inject a prebuilt image. Env comes from `.env.example` via `env_file`.
   - **postgres:** `postgres:16.4-alpine`, `pg_isready` healthcheck, named volume.
-  - **rabbitmq:** `rabbitmq:4.0-management-alpine` (exact tags), `rabbitmq-diagnostics -q ping` healthcheck, UI on 15672.
+  - **rabbitmq:** the same exact `rabbitmq:4.3.<patch>-management-alpine` tag as `RABBITMQ_IMAGE` in `tests/conftest.py`, `rabbitmq-diagnostics -q ping` healthcheck, UI on 15672.
   - **migrate:** depends on postgres healthy.
   - **api:** port 8000, depends on `migrate: service_completed_successfully`, healthcheck `python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"`.
   - **worker and consumers:** depend on migrate done + rabbitmq healthy, `restart: unless-stopped`.
