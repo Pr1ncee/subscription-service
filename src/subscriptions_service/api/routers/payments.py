@@ -5,6 +5,7 @@ from fastapi import APIRouter, Query, Response, status
 
 from subscriptions_service.api.deps import PaymentServiceDep
 from subscriptions_service.api.schemas import (
+    NO_NUL_PATTERN,
     EventDeliveryOut,
     NotificationDeliveryOut,
     PaymentIn,
@@ -45,7 +46,7 @@ async def get_payment(payment_id: uuid.UUID, service: PaymentServiceDep) -> Paym
 
 @router.get("")
 async def get_payment_by_provider(
-    provider_payment: Annotated[str, Query(min_length=1, max_length=255)],
+    provider_payment: Annotated[str, Query(min_length=1, max_length=255, pattern=NO_NUL_PATTERN)],
     service: PaymentServiceDep,
 ) -> PaymentStatusOut:
     """Same as `GET /payments/{payment_id}`, looked up by the provider's payment id."""

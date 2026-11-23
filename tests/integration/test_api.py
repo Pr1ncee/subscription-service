@@ -197,3 +197,47 @@ def test_openapi_lists_routes() -> None:
         "/health/live",
         "/health/ready",
     }
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "body"),
+    [
+        ("PUT", "/subscriptions/a%00b", SUB),
+        ("GET", "/subscriptions/a%00b", None),
+        ("PUT", "/subscriptions/s1", {**SUB, "user_id": "a\u0000b"}),
+        ("POST", "/payments", {**PAY, "provider_payment": "x\u0000y"}),
+        ("POST", "/payments", {**PAY, "subscription_id": "x\u0000y"}),
+        ("GET", "/payments?provider_payment=a%00b", None),
+    ],
+)
+async def test_nul_byte_in_text_input_is_422(
+    api_client: httpx.AsyncClient, method: str, url: str, body: dict[str, Any] | None
+) -> None:
+    r = await api_client.request(method, url, json=body)
+    assert r.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "expires",
+    [
+        "0001-01-01T00:00:00Z",
+        "0001-01-02T00:00:00+05:00",
+        "0001-01-01T00:00:00+00:30",
+        "9999-12-31T23:59:59-05:00",
+        "9001-01-01T00:00:00Z",
+        "1969-12-31T23:59:59Z",
+    ],
+)
+async def test_out_of_range_expiry_is_422(api_client: httpx.AsyncClient, expires: str) -> None:
+    r = await api_client.put("/subscriptions/s1", json={**SUB, "expected_expires_on": expires})
+    assert r.status_code == 422
+
+
+async def test_put_response_is_utc_and_matches_get(api_client: httpx.AsyncClient) -> None:
+    await _put_s1(api_client)
+    r = await api_client.put(
+        "/subscriptions/s1", json={**SUB, "expected_expires_on": "2026-03-01T00:00:00+03:00"}
+    )
+    assert r.status_code == 200
+    assert r.json()["expected_expires_on"] == "2026-02-28T21:00:00Z"
+    assert r.json() == (await api_client.get("/subscriptions/s1")).json()

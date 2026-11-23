@@ -1,16 +1,37 @@
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Annotated
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
 from subscriptions_service.domain.enums import NotificationStatus, PaymentStatus
 
+# Postgres `text` cannot store NUL; reject it here instead of failing in the driver.
+NO_NUL_PATTERN = r"^[^\x00]*$"
+TextId = Annotated[str, Field(min_length=1, max_length=255, pattern=NO_NUL_PATTERN)]
+
+# Leaves headroom for reminder offsets and paid extensions without leaving datetime's range.
+MIN_EXPIRY_YEAR, MAX_EXPIRY_YEAR = 1970, 9000
+
+
+def _bounded_utc(value: datetime) -> datetime:
+    try:
+        utc = value.astimezone(UTC)
+    except OverflowError as e:
+        raise ValueError("datetime is out of range") from e
+    if not MIN_EXPIRY_YEAR <= utc.year < MAX_EXPIRY_YEAR:
+        raise ValueError(f"year must be in [{MIN_EXPIRY_YEAR}, {MAX_EXPIRY_YEAR})")
+    return utc
+
+
+ExpiryDatetime = Annotated[AwareDatetime, AfterValidator(_bounded_utc)]
+
 
 class SubscriptionUpsertIn(BaseModel):
-    user_id: str = Field(min_length=1, max_length=255)
+    user_id: TextId
     day_count: int = Field(gt=0, le=3650)
-    expected_expires_on: AwareDatetime
+    expected_expires_on: ExpiryDatetime
 
 
 class NotificationOut(BaseModel):
@@ -34,8 +55,8 @@ class SubscriptionOut(BaseModel):
 
 
 class PaymentIn(BaseModel):
-    subscription_id: str = Field(min_length=1, max_length=255)
-    provider_payment: str = Field(min_length=1, max_length=255)
+    subscription_id: TextId
+    provider_payment: TextId
     amount: Decimal = Field(gt=0, max_digits=19, decimal_places=4)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     status: PaymentStatus
