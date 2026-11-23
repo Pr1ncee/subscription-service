@@ -1,0 +1,110 @@
+[project]
+name = "subscriptions-service"
+version = "0.1.0"
+description = "Subscription payments and notifications service"
+readme = "README.md"
+authors = [
+    { name = "Andrei Strongin", email = "andrei.strongin@newo.ai" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.20.1",
+    "asyncpg>=0.32.0",
+    "fastapi[standard]>=0.162.2",
+    "faststream[rabbit]>=0.7.8",
+    "pydantic-settings>=2.16.2",
+    "sqlalchemy[asyncio]>=2.1.8",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.13,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "black>=26.10.1",
+    "httpx>=0.28.1",
+    "import-linter>=2.16",
+    "mypy>=2.4.1",
+    "pre-commit>=4.7.0",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1.post1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.4",
+    "testcontainers[postgres,rabbitmq]>=4.15.0",
+]
+
+# Resolve from public PyPI so the lockfile works for anyone (Docker builds, CI),
+# regardless of a developer's user-level index configuration.
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[tool.fastapi]
+entrypoint = "subscriptions_service.api.app:app"
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "ASYNC", "S", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+strict = true
+files = ["src"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["e2e: needs docker compose stack", "slow: pauses containers"]
+addopts = "-m 'not e2e'"
+
+[tool.coverage.run]
+source = ["subscriptions_service"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+
+[tool.importlinter]
+root_package = "subscriptions_service"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Layers"
+type = "layers"
+layers = [
+  "subscriptions_service.api | subscriptions_service.worker | subscriptions_service.consumers",
+  "subscriptions_service.adapters",
+  "subscriptions_service.services",
+  "subscriptions_service.repositories",
+  "subscriptions_service.db",
+  "subscriptions_service.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "Inner layers are framework- and config-free"
+type = "forbidden"
+source_modules = [
+  "subscriptions_service.domain",
+  "subscriptions_service.services",
+  "subscriptions_service.repositories",
+]
+forbidden_modules = ["fastapi", "faststream", "aio_pika", "subscriptions_service.config"]
+
+[[tool.importlinter.contracts]]
+name = "Domain is pure"
+type = "forbidden"
+source_modules = ["subscriptions_service.domain"]
+forbidden_modules = ["sqlalchemy", "pydantic"]
