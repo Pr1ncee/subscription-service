@@ -25,25 +25,9 @@ from subscriptions_service.services.ports import (
     TransientSendError,
 )
 from subscriptions_service.services.reminders import reschedule_reminders
+from subscriptions_service.services.utils import payload_text, payload_uuid
 
 logger = logging.getLogger(__name__)
-
-
-# --- payload parsing: a malformed payload is poison (InvalidEnvelopeError), never a retry ---
-
-
-def _text(payload: Mapping[str, Any], key: str) -> str:
-    value = payload.get(key)
-    if not isinstance(value, str) or not value:
-        raise InvalidEnvelopeError(f"payload.{key} must be a non-empty string")
-    return value
-
-
-def _uuid(payload: Mapping[str, Any], key: str) -> uuid.UUID:
-    try:
-        return uuid.UUID(_text(payload, key))
-    except ValueError as e:
-        raise InvalidEnvelopeError(f"payload.{key} must be a UUID") from e
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +39,7 @@ class _PaymentEvent:
 
     @classmethod
     def parse(cls, payload: Mapping[str, Any]) -> "_PaymentEvent":
-        status = _text(payload, "status")
+        status = payload_text(payload, "status")
         try:
             event_name = NotificationEvent(f"payment.{status}")
         except ValueError as e:
@@ -64,7 +48,10 @@ class _PaymentEvent:
         if not isinstance(period_days, int) or isinstance(period_days, bool) or period_days <= 0:
             raise InvalidEnvelopeError("payload.period_days must be a positive integer")
         return cls(
-            _uuid(payload, "payment_id"), _text(payload, "subscription_id"), event_name, period_days
+            payload_uuid(payload, "payment_id"),
+            payload_text(payload, "subscription_id"),
+            event_name,
+            period_days,
         )
 
 
@@ -143,7 +130,7 @@ class NotificationDelivery:
         self._sender = sender
 
     async def handle(self, envelope: EventEnvelope) -> None:
-        notification_id = _uuid(envelope.payload, "notification_id")
+        notification_id = payload_uuid(envelope.payload, "notification_id")
         now = self._clock.now()
         async with self._uow_factory() as uow:
             if not await uow.inbox.try_mark_processed(self.CONSUMER_NAME, envelope.event_id, now):
@@ -210,7 +197,7 @@ class DeadLetterHandler:
         if envelope.event_type is not EventType.NOTIFICATION_DUE:
             return
         try:
-            notification_id = _uuid(envelope.payload, "notification_id")
+            notification_id = payload_uuid(envelope.payload, "notification_id")
         except InvalidEnvelopeError as e:
             # Unrecordable: retrying cannot help, and the DLQ has no delivery limit.
             logger.error("dead letter has an invalid payload", extra={"error": str(e)})

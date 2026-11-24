@@ -1,36 +1,29 @@
+"""Request and response models of the HTTP API."""
+
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Self
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
+from subscriptions_service.api.utils import bounded_utc
+from subscriptions_service.config import (
+    CURRENCY_PATTERN,
+    MAX_DAY_COUNT,
+    MAX_TEXT_ID_LENGTH,
+    NO_NUL_PATTERN,
+)
 from subscriptions_service.domain.enums import NotificationStatus, PaymentStatus
+from subscriptions_service.services.dto import PaymentStatusView
 
-# Postgres `text` cannot store NUL; reject it here instead of failing in the driver.
-NO_NUL_PATTERN = r"^[^\x00]*$"
-TextId = Annotated[str, Field(min_length=1, max_length=255, pattern=NO_NUL_PATTERN)]
-
-# Leaves headroom for reminder offsets and paid extensions without leaving datetime's range.
-MIN_EXPIRY_YEAR, MAX_EXPIRY_YEAR = 1970, 9000
-
-
-def _bounded_utc(value: datetime) -> datetime:
-    try:
-        utc = value.astimezone(UTC)
-    except OverflowError as e:
-        raise ValueError("datetime is out of range") from e
-    if not MIN_EXPIRY_YEAR <= utc.year < MAX_EXPIRY_YEAR:
-        raise ValueError(f"year must be in [{MIN_EXPIRY_YEAR}, {MAX_EXPIRY_YEAR})")
-    return utc
-
-
-ExpiryDatetime = Annotated[AwareDatetime, AfterValidator(_bounded_utc)]
+TextId = Annotated[str, Field(min_length=1, max_length=MAX_TEXT_ID_LENGTH, pattern=NO_NUL_PATTERN)]
+ExpiryDatetime = Annotated[AwareDatetime, AfterValidator(bounded_utc)]
 
 
 class SubscriptionUpsertIn(BaseModel):
     user_id: TextId
-    day_count: int = Field(gt=0, le=3650)
+    day_count: int = Field(gt=0, le=MAX_DAY_COUNT)
     expected_expires_on: ExpiryDatetime
 
 
@@ -58,7 +51,7 @@ class PaymentIn(BaseModel):
     subscription_id: TextId
     provider_payment: TextId
     amount: Decimal = Field(gt=0, max_digits=19, decimal_places=4)
-    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    currency: str = Field(pattern=CURRENCY_PATTERN)
     status: PaymentStatus
 
 
@@ -93,5 +86,21 @@ class NotificationDeliveryOut(BaseModel):
 
 
 class PaymentStatusOut(PaymentOut):
+    """A payment with the delivery state of its event and its result notification."""
+
     event: EventDeliveryOut
     notification: NotificationDeliveryOut | None
+
+    @classmethod
+    def from_view(cls, view: PaymentStatusView) -> Self:
+        """Map the service's view to the response model."""
+        payment = PaymentOut.model_validate(view.payment, from_attributes=True)
+        return cls(
+            **payment.model_dump(),
+            event=EventDeliveryOut.model_validate(view.event, from_attributes=True),
+            notification=(
+                None
+                if view.notification is None
+                else NotificationDeliveryOut.model_validate(view.notification, from_attributes=True)
+            ),
+        )

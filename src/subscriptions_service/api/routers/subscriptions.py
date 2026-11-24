@@ -3,15 +3,14 @@ from typing import Annotated
 from fastapi import APIRouter, Path, Response, status
 
 from subscriptions_service.api.deps import SubscriptionServiceDep
-from subscriptions_service.api.schemas import (
-    NO_NUL_PATTERN,
-    SubscriptionOut,
-    SubscriptionUpsertIn,
-)
+from subscriptions_service.api.schemas import SubscriptionOut, SubscriptionUpsertIn
+from subscriptions_service.config import MAX_TEXT_ID_LENGTH, NO_NUL_PATTERN
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 
-SubscriptionId = Annotated[str, Path(min_length=1, max_length=255, pattern=NO_NUL_PATTERN)]
+SubscriptionId = Annotated[
+    str, Path(min_length=1, max_length=MAX_TEXT_ID_LENGTH, pattern=NO_NUL_PATTERN)
+]
 
 
 @router.put(

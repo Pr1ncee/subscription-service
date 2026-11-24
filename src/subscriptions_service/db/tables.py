@@ -1,19 +1,14 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import CHAR, CheckConstraint, ForeignKey, Index, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from subscriptions_service.db.base import Base
+from subscriptions_service.db.utils import one_of
 from subscriptions_service.domain.enums import NotificationEvent, NotificationStatus, PaymentStatus
-
-
-def _one_of(column: str, enum: type[StrEnum]) -> str:
-    values = ", ".join(f"'{member.value}'" for member in enum)
-    return f"{column} IN ({values})"
 
 
 class SubscriptionRow(Base):
@@ -33,7 +28,7 @@ class PaymentRow(Base):
     __table_args__ = (
         CheckConstraint("amount > 0", name="amount_positive"),
         CheckConstraint("currency ~ '^[A-Z]{3}$'", name="currency_iso4217"),
-        CheckConstraint(_one_of("status", PaymentStatus), name="status_valid"),
+        CheckConstraint(one_of("status", PaymentStatus), name="status_valid"),
         CheckConstraint("period_days > 0", name="period_days_positive"),
     )
 
@@ -52,8 +47,8 @@ class PaymentRow(Base):
 class NotificationRow(Base):
     __tablename__ = "notifications"
     __table_args__ = (
-        CheckConstraint(_one_of("status", NotificationStatus), name="status_valid"),
-        CheckConstraint(_one_of("event_name", NotificationEvent), name="event_name_valid"),
+        CheckConstraint(one_of("status", NotificationStatus), name="status_valid"),
+        CheckConstraint(one_of("event_name", NotificationEvent), name="event_name_valid"),
         Index(
             "ix_notifications_due",
             "scheduled_for",

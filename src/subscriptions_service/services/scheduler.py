@@ -1,9 +1,7 @@
-from subscriptions_service.domain.enums import EventType, NotificationStatus
+from subscriptions_service.domain.enums import AggregateType, EventType, NotificationStatus
 from subscriptions_service.domain.events import EventEnvelope
 from subscriptions_service.repositories.uow import UnitOfWorkFactory
 from subscriptions_service.services.ports import Clock
-
-NOTIFICATION_AGGREGATE = "notification"
 
 
 class NotificationScheduler:
@@ -26,7 +24,7 @@ class NotificationScheduler:
                     EventEnvelope.new(
                         EventType.NOTIFICATION_DUE, {"notification_id": str(notification.id)}, now
                     ),
-                    NOTIFICATION_AGGREGATE,
+                    AggregateType.NOTIFICATION,
                     str(notification.id),
                 )
             return len(due)

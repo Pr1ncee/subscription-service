@@ -1,17 +1,12 @@
 """The one place that decides how a consumed message is settled with RabbitMQ."""
 
 import logging
-from enum import StrEnum
 
 from faststream.rabbit.annotations import RabbitMessage
 
+from subscriptions_service.consumers.enums import Outcome
+
 logger = logging.getLogger(__name__)
-
-
-class Outcome(StrEnum):
-    ACK = "ack"
-    RETRY = "retry"
-    DEAD_LETTER = "dead_letter"
 
 
 async def settle(message: RabbitMessage, outcome: Outcome, *, queue: str) -> None:

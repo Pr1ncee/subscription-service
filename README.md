@@ -195,9 +195,6 @@ the repo:
 
 ## Non-goals and future work
 
-Non-goals: authentication (internal service behind a gateway), real payment providers, real
-notification channels (pluggable `NotificationSender`, logging implementation), exactly-once delivery.
-
 Future work: `LISTEN/NOTIFY` relay wake-up; outbox cleanup/partitioning; Prometheus metrics (outbox
 lag, DLQ depth); OpenTelemetry tracing across outbox → consumer; DLQ replay tooling; auth;
 database statement timeouts for the worker loops.

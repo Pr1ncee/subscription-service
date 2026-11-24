@@ -25,3 +25,10 @@ class EventType(StrEnum):
     PAYMENT_SUCCEEDED = "payment.succeeded"
     PAYMENT_FAILED = "payment.failed"
     NOTIFICATION_DUE = "notification.due"
+
+
+class AggregateType(StrEnum):
+    """What an outbox row's `aggregate_id` refers to."""
+
+    PAYMENT = "payment"
+    NOTIFICATION = "notification"

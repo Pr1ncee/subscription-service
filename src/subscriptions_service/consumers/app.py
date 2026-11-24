@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from subscriptions_service.adapters.clock import SystemClock
 from subscriptions_service.adapters.logging_sender import LoggingSender
 from subscriptions_service.adapters.rabbit_topology import declare_topology
-from subscriptions_service.config import Settings
+from subscriptions_service.config import CONSUMER_PREFETCH, Settings
 from subscriptions_service.consumers.handlers import ConsumerServices, register_handlers
 from subscriptions_service.db.engine import create_engine, create_session_factory
 from subscriptions_service.repositories.uow import UnitOfWork
@@ -19,8 +19,6 @@ from subscriptions_service.services.consumers import (
 )
 from subscriptions_service.services.ports import Clock, NotificationSender
 
-CONSUMER_PREFETCH = 10
-
 
 def create_app(
     settings: Settings,
@@ -29,6 +27,12 @@ def create_app(
     clock: Clock | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> FastStream:
+    """Wire the consumer services, the subscribers and the broker into a FastStream app.
+
+    Bounded prefetch (`CONSUMER_PREFETCH`) keeps a backlog in RabbitMQ rather than in
+    memory. `sender`, `clock` and `session_factory` default to the production adapters
+    and are injectable for tests.
+    """
     engine: AsyncEngine | None = None
     if session_factory is None:
         engine = create_engine(settings.database_url)
@@ -45,8 +49,6 @@ def create_app(
         delivery=NotificationDelivery(uow_factory, clock, sender or LoggingSender()),
         dead_letters=DeadLetterHandler(uow_factory, clock),
     )
-    # Bounded prefetch: a backlog stays in RabbitMQ instead of in this process's memory,
-    # and extra replicas share the work.
     broker = RabbitBroker(
         settings.rabbitmq_url, default_channel=Channel(prefetch_count=CONSUMER_PREFETCH)
     )
@@ -55,12 +57,13 @@ def create_app(
 
     @app.on_startup
     async def connect_and_declare() -> None:
-        # FastStream runs on_startup before connecting; declarations need a channel.
+        """Connect, then declare the topology: FastStream runs `on_startup` before connecting."""
         await broker.connect()
         await declare_topology(broker, settings.consumer_delivery_limit)
 
     @app.after_shutdown
     async def dispose_engine() -> None:
+        """Close the database pool if this app created it."""
         if engine is not None:
             await engine.dispose()
 

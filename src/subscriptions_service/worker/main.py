@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import signal
 
 from faststream.rabbit import Channel, RabbitBroker
 
@@ -16,6 +15,7 @@ from subscriptions_service.repositories.uow import UnitOfWork
 from subscriptions_service.services.relay import OutboxRelay
 from subscriptions_service.services.scheduler import NotificationScheduler
 from subscriptions_service.worker.loop import run_periodic
+from subscriptions_service.worker.utils import stop_on_signals
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +24,10 @@ async def run_worker(settings: Settings, stop: asyncio.Event | None = None) -> N
     """Run until SIGTERM/SIGINT (or until `stop` is set, for tests).
 
     An unreachable broker at startup raises: the process exits non-zero and the
-    supervisor (compose `restart: unless-stopped`) restarts it.
+    supervisor (compose `restart: unless-stopped`) restarts it. The broker is connected
+    before the topology is declared, because declarations need an open channel.
     """
-    stop = stop or _stop_on_signals()
+    stop = stop or stop_on_signals()
     engine = create_engine(settings.database_url)
     session_factory = create_session_factory(engine)
     broker = RabbitBroker(settings.rabbitmq_url, default_channel=Channel(on_return_raises=True))
@@ -36,7 +37,7 @@ async def run_worker(settings: Settings, stop: asyncio.Event | None = None) -> N
         return UnitOfWork(session_factory)
 
     try:
-        await broker.connect()  # connect first: declarations need an open channel
+        await broker.connect()
         await declare_topology(broker, settings.consumer_delivery_limit)
         scheduler = NotificationScheduler(uow_factory, clock, settings.scheduler_batch_size)
         relay = OutboxRelay(
@@ -70,15 +71,8 @@ async def run_worker(settings: Settings, stop: asyncio.Event | None = None) -> N
         await engine.dispose()
 
 
-def _stop_on_signals() -> asyncio.Event:
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
-    return stop
-
-
 def main() -> None:
+    """Entry point: read settings from the environment and run the worker."""
     settings = Settings()
     configure_logging(settings.log_level)
     asyncio.run(run_worker(settings))

@@ -17,8 +17,8 @@ from subscriptions_service.adapters.rabbit_publisher import RabbitPublisher
 from subscriptions_service.adapters.rabbit_topology import DLQ_NAME, EVENTS_EXCHANGE, QUEUE_SPECS
 from subscriptions_service.config import Settings
 from subscriptions_service.consumers import acking
-from subscriptions_service.consumers.acking import Outcome
 from subscriptions_service.consumers.app import create_app
+from subscriptions_service.consumers.enums import Outcome
 from subscriptions_service.db.tables import ProcessedEventRow
 from subscriptions_service.domain.enums import EventType
 from subscriptions_service.domain.events import EventEnvelope
