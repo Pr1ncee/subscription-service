@@ -1,3 +1,9 @@
+"""Alembic environment: runs migrations over an async engine.
+
+Importing `db.tables` registers the models on `Base.metadata` for autogenerate.
+The URL comes from `config.attributes["database_url"]` (tests) or `DATABASE_URL`.
+"""
+
 import asyncio
 import os
 
@@ -6,7 +12,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from subscriptions_service.db import tables  # noqa: F401  (registers the models)
+from subscriptions_service.db import tables  # noqa: F401
 from subscriptions_service.db.base import Base
 
 config = context.config

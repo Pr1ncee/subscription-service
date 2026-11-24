@@ -16,13 +16,17 @@ from tests.fakes import FakeClock
 
 
 @pytest.mark.slow
-async def test_relay_keeps_rows_pending_while_broker_paused_then_publishes(  # Review Focus 2
+async def test_relay_keeps_rows_pending_while_broker_paused_then_publishes(
     uow_factory: UnitOfWorkFactory,
     psvc: PaymentService,
     clock: FakeClock,
     rabbit_broker: RabbitBroker,
     rabbit_container: RabbitMqContainer,
 ) -> None:
+    """Review Focus 2: while the broker is paused a batch costs one publish timeout
+    (not five) and every row stays pending. Past the first backoff the same relay and broker
+    objects publish all five, with no restart.
+    """
     await declare_topology(rabbit_broker, delivery_limit=5)
     pays = [await psvc.record(replace(CMD, provider_payment=f"pp-{i}")) for i in range(5)]
     relay = OutboxRelay(
@@ -37,7 +41,7 @@ async def test_relay_keeps_rows_pending_while_broker_paused_then_publishes(  # R
     try:
         started = time.monotonic()
         assert await relay.run_once() == 0
-        assert time.monotonic() - started < 2.5  # one publish timeout, not five
+        assert time.monotonic() - started < 2.5
     finally:
         rabbit_container.get_wrapped_container().unpause()
 
@@ -45,8 +49,8 @@ async def test_relay_keeps_rows_pending_while_broker_paused_then_publishes(  # R
     assert all(not e.published for e in events)
     assert sorted(e.attempts for e in events) == [0, 0, 0, 0, 1]
 
-    clock.advance(timedelta(seconds=1))  # past the first backoff
-    assert await relay.run_once() == 5  # same relay and broker objects: no restart
+    clock.advance(timedelta(seconds=1))
+    assert await relay.run_once() == 5
     events = [(await psvc.get_status(p.view.payment_id)).event for p in pays]
     assert all(e.published for e in events)
 

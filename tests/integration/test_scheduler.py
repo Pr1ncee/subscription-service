@@ -46,8 +46,11 @@ async def test_queues_due_reminder_and_writes_outbox(
     uow_factory: UnitOfWorkFactory,
     clock: FakeClock,
 ) -> None:
+    """Once the 3-day reminder is due it is queued with an outbox event; a second run
+    finds nothing left to queue.
+    """
     await subs.upsert("s1", "u1", 30, clock.now() + 10 * D)
-    clock.advance(7 * D)  # 3-day reminder is now due
+    clock.advance(7 * D)
     assert await sched.run_once() == 1
 
     view = await subs.get("s1")
@@ -56,7 +59,7 @@ async def test_queues_due_reminder_and_writes_outbox(
     assert queued[0].scheduled_for == clock.now()
     assert [n.status for n in view.notifications].count("scheduled") == 2
     assert await _due_events(uow_factory, clock) == [{"notification_id": str(queued[0].id)}]
-    assert await sched.run_once() == 0  # already queued
+    assert await sched.run_once() == 0
 
 
 async def test_nothing_due_returns_zero(

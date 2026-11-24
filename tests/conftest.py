@@ -22,8 +22,8 @@ from tests.fakes import FakeClock
 from tests.support import alembic_config
 
 TABLES = "subscriptions, notifications, payments, outbox, processed_events"
-# Same exact tag as docker-compose: delivery-limit semantics changed in RabbitMQ 4.3.
 RABBITMQ_IMAGE = "rabbitmq:4.3.8-management-alpine"
+"""Same exact tag as docker-compose: delivery-limit semantics changed in RabbitMQ 4.3."""
 RABBITMQ_MANAGEMENT_PORT = 15672
 
 
@@ -111,9 +111,11 @@ async def _delete_all_queues(management_url: str) -> None:
 
 @pytest.fixture
 async def rabbit_broker(rabbit_url: str, rabbit_management: str) -> AsyncIterator[RabbitBroker]:
+    """A connected broker. Afterwards every queue is deleted: tests declare queues with
+    different `x-delivery-limit` values, which would otherwise collide.
+    """
     broker = RabbitBroker(rabbit_url, default_channel=Channel(on_return_raises=True))
     await broker.connect()
     yield broker
     await broker.stop()
-    # Tests declare queues with different x-delivery-limit values; drop them so they don't collide.
     await _delete_all_queues(rabbit_management)

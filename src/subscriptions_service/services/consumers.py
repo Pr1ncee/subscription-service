@@ -65,6 +65,7 @@ class PaymentResultNotifier:
         self._clock = clock
 
     async def handle(self, envelope: EventEnvelope) -> None:
+        """Create the payment's result notification, once per event and once per payment."""
         event = _PaymentEvent.parse(envelope.payload)
         now = self._clock.now()
         async with self._uow_factory() as uow:
@@ -96,6 +97,12 @@ class SubscriptionExtender:
         self._offsets = tuple(reminder_offsets_days)
 
     async def handle(self, envelope: EventEnvelope) -> None:
+        """Extend the subscription by the payment's period and reschedule its reminders.
+
+        The period comes from the event (snapshotted when the payment was recorded), never
+        from the subscription's current `day_count`. Lock order: subscription `FOR UPDATE`,
+        then its notifications. Events other than `payment.succeeded` are ignored.
+        """
         if envelope.event_type is not EventType.PAYMENT_SUCCEEDED:
             logger.warning("extender ignored event", extra={"event_type": envelope.event_type})
             return
@@ -104,12 +111,9 @@ class SubscriptionExtender:
         async with self._uow_factory() as uow:
             if not await uow.inbox.try_mark_processed(self.CONSUMER_NAME, envelope.event_id, now):
                 return
-            # Lock order: subscription → notification (reschedule touches notifications).
             subscription = await uow.subscriptions.get_for_update(event.subscription_id)
             if subscription is None:
                 raise LookupError(f"subscription {event.subscription_id!r} not found")
-            # The period comes from the event (snapshotted at payment time), never from
-            # the subscription's current day_count.
             subscription.expected_expires_on = extend_expiry(
                 subscription.expected_expires_on, event.period_days, now
             )
@@ -130,6 +134,14 @@ class NotificationDelivery:
         self._sender = sender
 
     async def handle(self, envelope: EventEnvelope) -> None:
+        """Send a queued notification; a reminder whose expiry has changed is cancelled instead.
+
+        Lock order: subscription `FOR SHARE`, then notification `FOR UPDATE`. The extender
+        holds the subscription `FOR UPDATE`, so no extension can commit between the stale
+        check and the send. `PermanentSendError` marks the notification failed; any other
+        sender error is raised as `TransientSendError`, rolling back for a retry. Unknown
+        notification ids are dropped with a warning.
+        """
         notification_id = payload_uuid(envelope.payload, "notification_id")
         now = self._clock.now()
         async with self._uow_factory() as uow:
@@ -141,12 +153,9 @@ class NotificationDelivery:
                     "notification not found", extra={"notification_id": str(notification_id)}
                 )
                 return
-            # Lock order: subscription (FOR SHARE) → notification (FOR UPDATE). The extender
-            # holds the subscription FOR UPDATE, so no extension can commit between the
-            # stale check below and the send.
             subscription = await uow.subscriptions.get_for_share(peek.subscription_id)
             notification = await uow.notifications.get_for_update(notification_id)
-            if subscription is None or notification is None:  # pragma: no cover - FK-protected
+            if subscription is None or notification is None:  # pragma: no cover
                 return
             if notification.status != NotificationStatus.QUEUED:
                 return
@@ -171,7 +180,6 @@ class NotificationDelivery:
                 notification.updated_at = now
                 return
             except Exception as e:
-                # Anything else from the sender is transient: roll back and let it retry.
                 raise TransientSendError(f"send failed: {e}") from e
             notification.status = NotificationStatus.SENT.value
             notification.sent_at = now
@@ -186,6 +194,11 @@ class DeadLetterHandler:
         self._clock = clock
 
     async def handle(self, envelope: EventEnvelope, reason: str) -> None:
+        """Log the dead letter and mark a still-`queued` notification `failed`.
+
+        A `notification.due` with an invalid payload cannot be recorded; it is only logged,
+        because retrying cannot help and the DLQ has no delivery limit.
+        """
         logger.error(
             "event dead-lettered",
             extra={
@@ -199,7 +212,6 @@ class DeadLetterHandler:
         try:
             notification_id = payload_uuid(envelope.payload, "notification_id")
         except InvalidEnvelopeError as e:
-            # Unrecordable: retrying cannot help, and the DLQ has no delivery limit.
             logger.error("dead letter has an invalid payload", extra={"error": str(e)})
             return
         now = self._clock.now()

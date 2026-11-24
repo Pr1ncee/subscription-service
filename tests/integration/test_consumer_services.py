@@ -27,9 +27,6 @@ from tests.fakes import FakeClock, RecordingSender
 D = timedelta(days=1)
 
 
-# --- fixtures -------------------------------------------------------------------------
-
-
 @pytest.fixture
 def payments(uow_factory: UnitOfWorkFactory, clock: FakeClock) -> PaymentService:
     return PaymentService(uow_factory, clock)
@@ -65,9 +62,6 @@ def delivery(
 @pytest.fixture
 def dead_letters(uow_factory: UnitOfWorkFactory, clock: FakeClock) -> DeadLetterHandler:
     return DeadLetterHandler(uow_factory, clock)
-
-
-# --- helpers --------------------------------------------------------------------------
 
 
 async def _envelope(
@@ -107,9 +101,6 @@ async def s1(subs: SubscriptionService, clock: FakeClock) -> None:
     await subs.upsert("s1", "u1", 30, clock.now() + 10 * D)
 
 
-# --- PaymentResultNotifier ------------------------------------------------------------
-
-
 @pytest.mark.usefixtures("s1")
 async def test_payment_notifier_creates_one_notification(
     notifier: PaymentResultNotifier,
@@ -142,9 +133,6 @@ async def test_payment_notifier_failed_payment_event_name(
     assert names.count("payment.failed") == 1
 
 
-# --- SubscriptionExtender -------------------------------------------------------------
-
-
 @pytest.mark.usefixtures("s1")
 async def test_extender_applies_once_per_payment(
     extender: SubscriptionExtender,
@@ -172,8 +160,11 @@ async def test_extender_uses_period_from_event_not_current_day_count(
     uow_factory: UnitOfWorkFactory,
     clock: FakeClock,
 ) -> None:
-    pay = await payments.record(CMD)  # period_days = 30
-    await subs.upsert("s1", "u1", 60, clock.now() + 10 * D)  # later PUT changes the period
+    """The extension uses the period snapshotted on the payment (30 days), not the
+    `day_count` a later PUT set.
+    """
+    pay = await payments.record(CMD)
+    await subs.upsert("s1", "u1", 60, clock.now() + 10 * D)
     await extender.handle(await _payment_env(uow_factory, pay))
     assert (await subs.get("s1")).expected_expires_on == clock.now() + 40 * D
 
@@ -204,9 +195,6 @@ async def test_two_payments_extend_twice(
     await extender.handle(await _payment_env(uow_factory, first))
     await extender.handle(await _payment_env(uow_factory, second))
     assert (await subs.get("s1")).expected_expires_on == clock.now() + 70 * D
-
-
-# --- NotificationDelivery -------------------------------------------------------------
 
 
 @pytest.mark.usefixtures("s1")
@@ -250,7 +238,7 @@ async def test_delivery_duplicate_message_sends_once(
 
 
 @pytest.mark.usefixtures("s1")
-async def test_delivery_skips_stale_reminder_after_extension(  # Review Focus 1
+async def test_delivery_skips_stale_reminder_after_extension(
     delivery: NotificationDelivery,
     extender: SubscriptionExtender,
     sender: RecordingSender,
@@ -260,8 +248,11 @@ async def test_delivery_skips_stale_reminder_after_extension(  # Review Focus 1
     uow_factory: UnitOfWorkFactory,
     clock: FakeClock,
 ) -> None:
+    """Review Focus 1: a reminder queued before the user paid is cancelled, not sent,
+    once the payment moved the expiry.
+    """
     note_id, due_env = await _queue_three_day_reminder(subs, sched, uow_factory, clock)
-    pay = await payments.record(CMD)  # the user pays after the reminder was queued
+    pay = await payments.record(CMD)
     await extender.handle(await _payment_env(uow_factory, pay))
     await delivery.handle(due_env)
     assert sender.sent == []
@@ -278,10 +269,13 @@ async def test_delivery_sends_payment_notification_without_stale_check(
     sched: NotificationScheduler,
     uow_factory: UnitOfWorkFactory,
 ) -> None:
+    """Payment notifications are not reminders: one is sent even though the
+    extension changed the expiry.
+    """
     pay = await payments.record(CMD)
     env = await _payment_env(uow_factory, pay)
     await notifier.handle(env)
-    await extender.handle(env)  # expiry changes; payment notifications are not reminders
+    await extender.handle(env)
     assert await sched.run_once() == 1
     status = await payments.get_status(pay.view.payment_id)
     async with uow_factory() as uow:
@@ -330,16 +324,19 @@ async def test_delivery_permanent_error_marks_failed(
     uow_factory: UnitOfWorkFactory,
     clock: FakeClock,
 ) -> None:
+    """A permanent sender error marks the notification `failed` and returns without
+    raising: the message is done.
+    """
     note_id, env = await _queue_three_day_reminder(subs, sched, uow_factory, clock)
     sender.error = PermanentSendError("bad address")
-    await delivery.handle(env)  # no raise: the message is done
+    await delivery.handle(env)
     async with uow_factory() as uow:
         row = await uow.notifications.get_for_update(note_id)
     assert row is not None and (row.status, row.last_error) == ("failed", "bad address")
 
 
 @pytest.mark.usefixtures("s1")
-async def test_delivery_transient_error_rolls_back_and_retries(  # Review Focus 5
+async def test_delivery_transient_error_rolls_back_and_retries(
     delivery: NotificationDelivery,
     sender: RecordingSender,
     subs: SubscriptionService,
@@ -347,13 +344,16 @@ async def test_delivery_transient_error_rolls_back_and_retries(  # Review Focus 
     uow_factory: UnitOfWorkFactory,
     clock: FakeClock,
 ) -> None:
+    """Review Focus 5: a transient sender error rolls back everything, inbox row
+    included, so the redelivery is processed and sends once.
+    """
     note_id, env = await _queue_three_day_reminder(subs, sched, uow_factory, clock)
     sender.error = RuntimeError("smtp timeout")
     with pytest.raises(RuntimeError):
         await delivery.handle(env)
     assert (await _note(subs, note_id)).status == "queued"
     sender.error = None
-    await delivery.handle(env)  # redelivery: the inbox row was rolled back too
+    await delivery.handle(env)
     assert (await _note(subs, note_id)).status == "sent"
     assert len(sender.sent) == 1
 
@@ -371,7 +371,7 @@ class BlockingSender:
 
 
 @pytest.mark.usefixtures("s1")
-async def test_extension_waits_for_in_flight_delivery(  # interleaved race (spec §7.5)
+async def test_extension_waits_for_in_flight_delivery(
     extender: SubscriptionExtender,
     payments: PaymentService,
     subs: SubscriptionService,
@@ -379,6 +379,10 @@ async def test_extension_waits_for_in_flight_delivery(  # interleaved race (spec
     uow_factory: UnitOfWorkFactory,
     clock: FakeClock,
 ) -> None:
+    """Interleaved race (spec §7.5): while delivery holds the subscription FOR SHARE,
+    the extension blocks on the subscription lock. The reminder, valid when sent, is sent
+    once; the extension then applies and reschedules the reminders.
+    """
     pay = await payments.record(CMD)
     payment_env = await _payment_env(uow_factory, pay)
     note_id, due_env = await _queue_three_day_reminder(subs, sched, uow_factory, clock)
@@ -387,22 +391,19 @@ async def test_extension_waits_for_in_flight_delivery(  # interleaved race (spec
     blocking = BlockingSender()
     delivery = NotificationDelivery(uow_factory, clock, blocking)
     t_deliver = asyncio.create_task(delivery.handle(due_env))
-    await asyncio.wait_for(blocking.entered.wait(), 5)  # delivery holds subscription FOR SHARE
+    await asyncio.wait_for(blocking.entered.wait(), 5)
     t_extend = asyncio.create_task(extender.handle(payment_env))
     await asyncio.sleep(0.3)
-    assert not t_extend.done()  # extension blocked on the subscription lock
+    assert not t_extend.done()
     blocking.release.set()
     await asyncio.wait_for(asyncio.gather(t_deliver, t_extend), 5)
 
     view = await subs.get("s1")
-    assert (await _note(subs, note_id)).status == "sent"  # it was valid when sent
+    assert (await _note(subs, note_id)).status == "sent"
     assert len(blocking.sent) == 1
     assert view.expected_expires_on == expiry_before + 30 * D
     scheduled = [n.scheduled_for for n in view.notifications if n.status == "scheduled"]
     assert scheduled == [view.expected_expires_on - o * D for o in (3, 1, 0)]
-
-
-# --- DeadLetterHandler ----------------------------------------------------------------
 
 
 @pytest.mark.usefixtures("s1")
@@ -487,7 +488,10 @@ async def test_payment_handlers_bad_payload_is_poison(
 async def test_dead_letter_with_bad_payload_is_logged_not_raised(
     dead_letters: DeadLetterHandler, clock: FakeClock, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """An invalid dead-letter payload is logged, not raised: raising would make the
+    DLQ handler loop forever.
+    """
     env = EventEnvelope.new(EventType.NOTIFICATION_DUE, {"notification_id": "x"}, clock.now())
     with caplog.at_level(logging.ERROR):
-        await dead_letters.handle(env, "delivery_limit")  # must not raise: it would loop forever
+        await dead_letters.handle(env, "delivery_limit")
     assert any("dead-lettered" in r.getMessage() for r in caplog.records)

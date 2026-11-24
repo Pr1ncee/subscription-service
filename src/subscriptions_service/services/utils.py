@@ -84,9 +84,12 @@ def payment_view(payment: PaymentRow) -> PaymentView:
 
 
 async def payment_status_view(uow: UnitOfWork, payment: PaymentRow) -> PaymentStatusView:
-    """A payment with the delivery state of its outbox event and its result notification."""
+    """A payment with the delivery state of its outbox event and its result notification.
+
+    The event always exists: it is written in the same transaction as the payment.
+    """
     event = await uow.outbox.get_for_aggregate(AggregateType.PAYMENT, str(payment.id))
-    if event is None:  # pragma: no cover - written in the same transaction as the payment
+    if event is None:  # pragma: no cover
         raise RuntimeError(f"payment {payment.id} has no outbox event")
     notification = await uow.notifications.get_by_payment(payment.id)
     return PaymentStatusView(

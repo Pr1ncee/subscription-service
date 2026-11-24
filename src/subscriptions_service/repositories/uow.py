@@ -35,6 +35,7 @@ class UnitOfWork:
         return self
 
     async def commit(self) -> None:
+        """Commit now, before the block ends (e.g. to release locks early)."""
         assert self._session is not None, "UnitOfWork used outside `async with`"  # noqa: S101
         await self._session.commit()
 

@@ -27,6 +27,7 @@ def relay_factory(uow_factory: UnitOfWorkFactory, clock: FakeClock) -> RelayFact
 async def test_publishes_pending_and_marks_published(
     relay_factory: RelayFactory, psvc: PaymentService, clock: FakeClock
 ) -> None:
+    """A pending event is published once and marked published; it is not republished."""
     pay = await psvc.record(CMD)
     pub = RecordingPublisher()
     relay = relay_factory(pub)
@@ -39,19 +40,22 @@ async def test_publishes_pending_and_marks_published(
     assert status.event.published and status.event.attempts == 1
     assert status.event.published_at == clock.now()
     assert env.event_id == status.event.event_id
-    assert await relay.run_once() == 0  # not republished
+    assert await relay.run_once() == 0
 
 
 async def test_failure_records_attempt_and_backs_off(
     relay_factory: RelayFactory, psvc: PaymentService, clock: FakeClock
 ) -> None:
+    """A failed publish records the attempt; the row is not due again until its backoff
+    (next_attempt_at = now + 0.5 s) has passed.
+    """
     pay = await psvc.record(CMD)
     assert await relay_factory(FailingPublisher()).run_once() == 0
     ev = (await psvc.get_status(pay.view.payment_id)).event
     assert (ev.published, ev.attempts) == (False, 1)
     assert ev.last_error is not None and "boom" in ev.last_error
     pub = RecordingPublisher()
-    assert await relay_factory(pub).run_once() == 0  # not yet due (next_attempt_at = now + 0.5s)
+    assert await relay_factory(pub).run_once() == 0
     clock.advance(timedelta(seconds=1))
     assert await relay_factory(pub).run_once() == 1
     ev = (await psvc.get_status(pay.view.payment_id)).event
@@ -96,7 +100,10 @@ async def test_respects_batch_size(
 async def test_commit_failure_after_publish_republishes_same_event_id(
     session_factory: async_sessionmaker[AsyncSession], psvc: PaymentService, clock: FakeClock
 ) -> None:
-    # crash window: broker confirmed, DB commit of published_at lost
+    """Crash window: the broker confirmed but the DB commit of `published_at` was lost.
+    The marking rolls back and the row stays pending, so the next run republishes an identical
+    envelope (same event_id, occurred_at and payload).
+    """
     pay = await psvc.record(CMD)
     pub = RecordingPublisher()
 
@@ -109,9 +116,9 @@ async def test_commit_failure_after_publish_republishes_same_event_id(
     )
     with pytest.raises(OperationalError):
         await crashing.run_once()
-    assert len(pub.published) == 1  # it did reach the broker
+    assert len(pub.published) == 1
     ev = (await psvc.get_status(pay.view.payment_id)).event
-    assert (ev.published, ev.attempts) == (False, 0)  # marking rolled back; row still pending
+    assert (ev.published, ev.attempts) == (False, 0)
 
     healthy = OutboxRelay(
         lambda: UnitOfWork(session_factory), pub, clock, batch_size=10, max_backoff_s=60
@@ -119,18 +126,20 @@ async def test_commit_failure_after_publish_republishes_same_event_id(
     assert await healthy.run_once() == 1
     assert len(pub.published) == 2
     assert pub.published[0].event_id == pub.published[1].event_id == ev.event_id
-    assert pub.published[0] == pub.published[1]  # identical envelope (same occurred_at, payload)
+    assert pub.published[0] == pub.published[1]
     assert (await psvc.get_status(pay.view.payment_id)).event.published is True
 
 
 async def test_unavailable_publisher_stops_the_batch(
     relay_factory: RelayFactory, psvc: PaymentService
 ) -> None:
-    # A broker that is down/hung must cost one publish timeout per batch, not batch_size of them.
+    """A broker that is down or hung costs one publish timeout per batch, not
+    `batch_size` of them: only the tried row is marked failed.
+    """
     pays = [await psvc.record(replace(CMD, provider_payment=f"pp-{i}")) for i in range(3)]
     pub = UnavailablePublisher()
     assert await relay_factory(pub).run_once() == 0
     assert pub.calls == 1
     events = [(await psvc.get_status(p.view.payment_id)).event for p in pays]
-    assert [e.attempts for e in events] == [1, 0, 0]  # only the tried row is marked failed
+    assert [e.attempts for e in events] == [1, 0, 0]
     assert events[0].last_error is not None and "broker unreachable" in events[0].last_error

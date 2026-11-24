@@ -12,6 +12,8 @@ from subscriptions_service.domain.enums import NotificationEvent, NotificationSt
 
 
 class SubscriptionRow(Base):
+    """A user's subscription; `day_count` is its billing period."""
+
     __tablename__ = "subscriptions"
     __table_args__ = (CheckConstraint("day_count > 0", name="day_count_positive"),)
 
@@ -24,6 +26,8 @@ class SubscriptionRow(Base):
 
 
 class PaymentRow(Base):
+    """A recorded payment; `period_days` snapshots the period it bought."""
+
     __tablename__ = "payments"
     __table_args__ = (
         CheckConstraint("amount > 0", name="amount_positive"),
@@ -45,6 +49,8 @@ class PaymentRow(Base):
 
 
 class NotificationRow(Base):
+    """A reminder or payment-result notification and its delivery state."""
+
     __tablename__ = "notifications"
     __table_args__ = (
         CheckConstraint(one_of("status", NotificationStatus), name="status_valid"),
@@ -77,6 +83,8 @@ class NotificationRow(Base):
 
 
 class OutboxRow(Base):
+    """An event written with its state change, published later by the relay."""
+
     __tablename__ = "outbox"
     __table_args__ = (
         Index(
@@ -101,6 +109,8 @@ class OutboxRow(Base):
 
 
 class ProcessedEventRow(Base):
+    """Inbox entry: an event a consumer has already applied."""
+
     __tablename__ = "processed_events"
 
     consumer: Mapped[str] = mapped_column(primary_key=True)

@@ -10,8 +10,13 @@ from subscriptions_service.services.ports import Clock, EventPublisher, Publishe
 logger = logging.getLogger(__name__)
 
 _BASE_DELAY_S = 0.5
-_MAX_EXPONENT = 32  # 0.5 * 2**32 s is far beyond any sane cap; avoids float overflow
+"""Backoff after the first failed attempt."""
+
+_MAX_EXPONENT = 32
+"""Bounds the exponent to avoid float overflow; 0.5 * 2**32 s is far beyond any sane cap."""
+
 _MAX_ERROR_LEN = 1000
+"""Longest `last_error` stored on an outbox row."""
 
 
 def backoff_delay(attempts: int, max_backoff_s: float) -> timedelta:
@@ -40,6 +45,11 @@ class OutboxRelay:
     async def run_once(self) -> int:
         """Publish one batch; returns how many rows were published.
 
+        `PublisherUnavailable` (broker down or hung) stops the batch: every further publish
+        would wait a full timeout too, so untried rows stay pending, untouched. Any other
+        error is a per-message failure (unroutable, nacked, malformed row): that row is
+        marked failed with a backoff and the batch continues.
+
         A failure to commit the marks propagates: the batch stays pending and is
         republished later with the same event ids, which consumers deduplicate.
         """
@@ -56,12 +66,9 @@ class OutboxRelay:
                     )
                     await self._publisher.publish(envelope)
                 except PublisherUnavailable as e:
-                    # The broker is down or hung: every further publish would wait a full
-                    # timeout too. Stop here; untried rows stay pending, untouched.
                     await self._mark_failed(uow, row, e)
                     break
                 except Exception as e:
-                    # A per-message failure (unroutable, nacked, malformed row): skip it.
                     await self._mark_failed(uow, row, e)
                     continue
                 await uow.outbox.mark_published(row, self._clock.now())

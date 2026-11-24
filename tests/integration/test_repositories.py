@@ -67,19 +67,22 @@ async def test_insert_payment_notification_is_idempotent(uow_factory: UnitOfWork
 async def test_lock_due_skips_rows_locked_by_another_tx(
     uow_factory: UnitOfWorkFactory, clock: FakeClock
 ) -> None:
+    """`lock_due` takes the earliest due row first, ignores rows not yet due, and
+    skips rows another transaction has locked.
+    """
     async with uow_factory() as uow:
         await uow.subscriptions.insert_if_absent(make_subscription("s1"))
         await uow.notifications.add_many(
             [
                 make_notification(scheduled_for=clock.now() - D),
                 make_notification(scheduled_for=clock.now() - 2 * D),
-                make_notification(scheduled_for=clock.now() + D),  # not due
+                make_notification(scheduled_for=clock.now() + D),
             ]
         )
     async with uow_factory() as a:
         locked_a = await a.notifications.lock_due(clock.now(), limit=1)
         assert len(locked_a) == 1
-        assert locked_a[0].scheduled_for == clock.now() - 2 * D  # earliest first
+        assert locked_a[0].scheduled_for == clock.now() - 2 * D
         async with uow_factory() as b:
             locked_b = await b.notifications.lock_due(clock.now(), limit=10)
             assert [n.id for n in locked_b] != [locked_a[0].id]

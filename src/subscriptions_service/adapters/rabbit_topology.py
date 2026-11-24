@@ -15,6 +15,8 @@ DLQ_NAME = "events.dlq"
 
 @dataclass(frozen=True, slots=True)
 class QueueSpec:
+    """A consumer queue and the routing keys it is bound with on the events exchange."""
+
     name: str
     routing_keys: tuple[str, ...]
 
@@ -26,6 +28,11 @@ QUEUE_SPECS: tuple[QueueSpec, ...] = (PAYMENTS_NOTIFY, PAYMENTS_EXTEND, NOTIFICA
 
 
 def rabbit_queue(spec: QueueSpec, delivery_limit: int) -> RabbitQueue:
+    """Quorum queue that dead-letters to `events.dlx` after `delivery_limit` deliveries.
+
+    At-least-once dead-lettering keeps the message until the DLQ confirms it; RabbitMQ
+    requires `reject-publish` overflow for this strategy.
+    """
     return RabbitQueue(
         spec.name,
         queue_type=QueueType.QUORUM,
@@ -33,8 +40,6 @@ def rabbit_queue(spec: QueueSpec, delivery_limit: int) -> RabbitQueue:
         arguments={
             "x-delivery-limit": delivery_limit,
             "x-dead-letter-exchange": DEAD_LETTER_EXCHANGE.name,
-            # at-least-once dead-lettering keeps the message until the DLQ confirms it;
-            # RabbitMQ requires reject-publish overflow for this strategy.
             "x-dead-letter-strategy": "at-least-once",
             "x-overflow": "reject-publish",
         },
@@ -42,8 +47,11 @@ def rabbit_queue(spec: QueueSpec, delivery_limit: int) -> RabbitQueue:
 
 
 def dead_letter_queue() -> RabbitQueue:
-    # Quorum queues default to a delivery limit of 20 in 4.x; without a DLX a message
-    # past it would be dropped, so the limit is switched off.
+    """Quorum queue for dead letters, with the delivery limit switched off.
+
+    Quorum queues default to a delivery limit of 20 in RabbitMQ 4.x; the DLQ has no
+    dead-letter exchange of its own, so a message past that limit would be dropped.
+    """
     return RabbitQueue(
         DLQ_NAME, queue_type=QueueType.QUORUM, durable=True, arguments={"x-delivery-limit": -1}
     )

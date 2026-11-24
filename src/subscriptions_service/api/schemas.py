@@ -22,12 +22,16 @@ ExpiryDatetime = Annotated[AwareDatetime, AfterValidator(bounded_utc)]
 
 
 class SubscriptionUpsertIn(BaseModel):
+    """Body of `PUT /subscriptions/{subscription_id}`."""
+
     user_id: TextId
     day_count: int = Field(gt=0, le=MAX_DAY_COUNT)
     expected_expires_on: ExpiryDatetime
 
 
 class NotificationOut(BaseModel):
+    """A scheduled or sent notification of a subscription."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
@@ -38,6 +42,8 @@ class NotificationOut(BaseModel):
 
 
 class SubscriptionOut(BaseModel):
+    """A subscription with its notification history."""
+
     model_config = ConfigDict(from_attributes=True)
 
     subscription_id: str
@@ -48,6 +54,8 @@ class SubscriptionOut(BaseModel):
 
 
 class PaymentIn(BaseModel):
+    """Body of `POST /payments`."""
+
     subscription_id: TextId
     provider_payment: TextId
     amount: Decimal = Field(gt=0, max_digits=19, decimal_places=4)
@@ -56,6 +64,8 @@ class PaymentIn(BaseModel):
 
 
 class PaymentOut(BaseModel):
+    """A recorded payment."""
+
     model_config = ConfigDict(from_attributes=True)
 
     payment_id: uuid.UUID
@@ -68,6 +78,8 @@ class PaymentOut(BaseModel):
 
 
 class EventDeliveryOut(BaseModel):
+    """Delivery state of a payment's outbox event."""
+
     model_config = ConfigDict(from_attributes=True)
 
     event_id: uuid.UUID
@@ -79,6 +91,8 @@ class EventDeliveryOut(BaseModel):
 
 
 class NotificationDeliveryOut(BaseModel):
+    """Delivery state of a payment's result notification."""
+
     model_config = ConfigDict(from_attributes=True)
 
     status: NotificationStatus

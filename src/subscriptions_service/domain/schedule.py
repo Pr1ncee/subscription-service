@@ -7,6 +7,8 @@ from subscriptions_service.domain.enums import NotificationEvent
 
 @dataclass(frozen=True, slots=True)
 class ReminderSlot:
+    """When a reminder is due and which event it is."""
+
     event: NotificationEvent
     scheduled_for: datetime
 

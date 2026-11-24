@@ -14,14 +14,17 @@ from subscriptions_service.services.subscriptions import SubscriptionService
 
 
 def get_settings(request: Request) -> Settings:
+    """Settings the app was started with."""
     return cast(Settings, request.app.state.settings)
 
 
 def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
+    """Session factory created by the app's lifespan."""
     return cast(async_sessionmaker[AsyncSession], request.app.state.session_factory)
 
 
 def get_clock() -> Clock:
+    """The system clock; overridden in tests."""
     return SystemClock()
 
 
@@ -33,12 +36,14 @@ ClockDep = Annotated[Clock, Depends(get_clock)]
 def get_subscription_service(
     session_factory: SessionFactoryDep, clock: ClockDep, settings: SettingsDep
 ) -> SubscriptionService:
+    """`SubscriptionService` with one unit of work per call."""
     return SubscriptionService(
         lambda: UnitOfWork(session_factory), clock, settings.reminder_offsets_days
     )
 
 
 def get_payment_service(session_factory: SessionFactoryDep, clock: ClockDep) -> PaymentService:
+    """`PaymentService` with one unit of work per call."""
     return PaymentService(lambda: UnitOfWork(session_factory), clock)
 
 

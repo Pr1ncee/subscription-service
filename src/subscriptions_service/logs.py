@@ -12,6 +12,7 @@ class JsonFormatter(logging.Formatter):
     """Formats each record as a single-line JSON object."""
 
     def format(self, record: logging.LogRecord) -> str:
+        """Render the record with its `extra` fields and any exception traceback."""
         entry: dict[str, Any] = {
             "ts": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
@@ -27,6 +28,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging(level: str) -> None:
+    """Send all logs to stderr as JSON lines at the given level."""
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()

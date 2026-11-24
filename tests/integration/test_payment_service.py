@@ -68,8 +68,11 @@ async def test_failed_payment_emits_payment_failed(psvc: PaymentService) -> None
 async def test_period_is_snapshotted_at_record_time(
     psvc: PaymentService, subs: SubscriptionService, clock: FakeClock
 ) -> None:
-    res = await psvc.record(CMD)  # s1 has day_count 30
-    await subs.upsert("s1", "u1", 60, clock.now() + 10 * D)  # later PUT changes the period
+    """The payment keeps s1's day_count (30) from when it was recorded; a later PUT
+    changing the period does not alter it.
+    """
+    res = await psvc.record(CMD)
+    await subs.upsert("s1", "u1", 60, clock.now() + 10 * D)
     assert (await psvc.get_status(res.view.payment_id)).payment.period_days == 30
 
 
@@ -112,7 +115,7 @@ async def test_duplicate_with_different_payload_conflicts(
 ) -> None:
     await psvc.record(CMD)
     with pytest.raises(ConflictError):
-        await psvc.record(replace(CMD, **change))  # type: ignore[arg-type]
+        await psvc.record(replace(CMD, **change))  # type: ignore
 
 
 async def test_duplicate_for_other_subscription_conflicts(

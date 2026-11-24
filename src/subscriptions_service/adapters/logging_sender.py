@@ -9,6 +9,7 @@ class LoggingSender:
     """`NotificationSender` that only logs: stands in for a real email/SMS/push channel."""
 
     async def send(self, message: OutgoingNotification) -> None:
+        """Log the notification as sent."""
         logger.info(
             "notification sent",
             extra={

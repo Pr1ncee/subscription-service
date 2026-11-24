@@ -128,7 +128,7 @@ make check                      # lint + typecheck + test (Docker must be runnin
 | Gate | Tool |
 |---|---|
 | Formatting | black (line length 100) — ruff is lint-only, `ruff format` is not used |
-| Lint | ruff (`E F I N UP B ASYNC S RUF`) |
+| Lint | ruff (`E F I N UP B ASYNC S RUF`, plus `D101`–`D103`: every public class, method and function in `src/` has a docstring) |
 | Types | mypy `strict` on `src/` |
 | Architecture | import-linter: layer order + framework-free inner layers + pure domain |
 

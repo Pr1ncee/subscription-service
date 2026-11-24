@@ -13,5 +13,6 @@ async def _conflict(_: Request, exc: Exception) -> JSONResponse:
 
 
 def register_error_handlers(app: FastAPI) -> None:
+    """Map domain errors to HTTP: `NotFoundError` → 404, `ConflictError` → 409."""
     app.add_exception_handler(NotFoundError, _not_found)
     app.add_exception_handler(ConflictError, _conflict)

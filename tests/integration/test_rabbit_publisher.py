@@ -38,6 +38,7 @@ async def test_event_retained_without_consumers(rabbit_broker: RabbitBroker) -> 
 
 
 async def test_routing_by_event_type(rabbit_broker: RabbitBroker) -> None:
+    """Events route by type; `payment.failed` does not reach the extend queue."""
     await declare_topology(rabbit_broker, delivery_limit=5)
     publisher = RabbitPublisher(rabbit_broker, timeout_s=5)
     failed = EventEnvelope.new(EventType.PAYMENT_FAILED, {"payment_id": "p2"}, NOW)
@@ -49,7 +50,7 @@ async def test_routing_by_event_type(rabbit_broker: RabbitBroker) -> None:
     extend = await rabbit_broker.declare_queue(
         RabbitQueue("payments.extend-subscription", declare=False)
     )
-    assert await extend.get(timeout=5, fail=False) is None  # payment.failed does not extend
+    assert await extend.get(timeout=5, fail=False) is None
 
 
 async def test_declare_topology_is_idempotent(rabbit_broker: RabbitBroker) -> None:
@@ -81,9 +82,12 @@ async def test_queue_arguments_declared(
 
 
 async def test_unroutable_publish_raises(rabbit_broker: RabbitBroker) -> None:
-    await rabbit_broker.declare_exchange(EVENTS_EXCHANGE)  # exchange only, no queues bound
+    """With the exchange declared but no queue bound, a publish must fail rather than
+    vanish silently; any failure is acceptable.
+    """
+    await rabbit_broker.declare_exchange(EVENTS_EXCHANGE)
     env = EventEnvelope.new(EventType.PAYMENT_SUCCEEDED, {"payment_id": "p1"}, NOW)
-    with pytest.raises(Exception):  # noqa: B017 - any failure is acceptable, silence is not
+    with pytest.raises(Exception):  # noqa: B017
         await RabbitPublisher(rabbit_broker, timeout_s=5).publish(env)
 
 
@@ -91,6 +95,9 @@ async def test_unroutable_publish_raises(rabbit_broker: RabbitBroker) -> None:
 async def test_publish_recovers_after_broker_pause(
     rabbit_broker: RabbitBroker, rabbit_container: RabbitMqContainer
 ) -> None:
+    """After a broker pause the same publisher (same broker object) publishes again
+    once the connection recovers.
+    """
     await declare_topology(rabbit_broker, 5)
     pub = RabbitPublisher(rabbit_broker, timeout_s=2)
     env = EventEnvelope.new(EventType.PAYMENT_SUCCEEDED, {"payment_id": "p1"}, NOW)
@@ -100,6 +107,6 @@ async def test_publish_recovers_after_broker_pause(
             await pub.publish(env)
     finally:
         rabbit_container.get_wrapped_container().unpause()
-    await pub.publish(env)  # same broker object; connection recovered
+    await pub.publish(env)
     message_id, _ = await _get_one(rabbit_broker, "payments.notify")
     assert message_id == str(env.event_id)

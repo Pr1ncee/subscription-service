@@ -13,9 +13,13 @@ class NotificationScheduler:
         self._batch_size = batch_size
 
     async def run_once(self) -> int:
+        """Queue one batch of due notifications; returns how many were queued.
+
+        Rows are locked with `SKIP LOCKED`, so concurrent schedulers take disjoint batches.
+        Each status change and its outbox event commit in one transaction.
+        """
         now = self._clock.now()
         async with self._uow_factory() as uow:
-            # SKIP LOCKED: concurrent schedulers take disjoint batches.
             due = await uow.notifications.lock_due(now, self._batch_size)
             for notification in due:
                 notification.status = NotificationStatus.QUEUED.value

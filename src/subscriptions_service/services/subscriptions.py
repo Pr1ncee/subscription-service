@@ -12,6 +12,8 @@ from subscriptions_service.services.utils import subscription_view
 
 
 class SubscriptionService:
+    """Creates and updates subscriptions and keeps their reminders scheduled."""
+
     def __init__(
         self, uow_factory: UnitOfWorkFactory, clock: Clock, reminder_offsets_days: Sequence[int]
     ) -> None:
@@ -41,7 +43,7 @@ class SubscriptionService:
                 )
             )
             subscription = await uow.subscriptions.get_for_update(subscription_id)
-            if subscription is None:  # pragma: no cover - the row was just inserted or existed
+            if subscription is None:  # pragma: no cover
                 raise NotFoundError(f"subscription {subscription_id!r} not found")
 
             if created:
@@ -62,6 +64,7 @@ class SubscriptionService:
         return UpsertResult(view=view, created=created)
 
     async def get(self, subscription_id: str) -> SubscriptionView:
+        """The subscription with its notification history; `NotFoundError` if unknown."""
         async with self._uow_factory() as uow:
             subscription = await uow.subscriptions.get(subscription_id)
             if subscription is None:

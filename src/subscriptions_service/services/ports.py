@@ -6,18 +6,25 @@ from typing import Protocol
 from subscriptions_service.domain.events import EventEnvelope
 
 
-class PublisherUnavailable(Exception):  # noqa: N818 - reads as a state, like TimeoutError
+class PublisherUnavailable(Exception):  # noqa: N818
     """The broker cannot be reached or did not answer in time.
 
     Distinct from a per-message rejection: retrying the next message now is pointless.
+    Named as a state, like `TimeoutError`, rather than with an `Error` suffix.
     """
 
 
 class Clock(Protocol):
-    def now(self) -> datetime: ...
+    """Source of the current time; injected so tests control it."""
+
+    def now(self) -> datetime:
+        """The current time, timezone-aware (UTC)."""
+        ...
 
 
 class EventPublisher(Protocol):
+    """Publishes outbox events to the broker; used only by the relay."""
+
     async def publish(self, envelope: EventEnvelope) -> None:
         """Publish and wait for the broker's confirm; raise if it is not confirmed.
 
@@ -28,6 +35,8 @@ class EventPublisher(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class OutgoingNotification:
+    """What the sender needs to notify a user."""
+
     notification_id: uuid.UUID
     user_id: str
     subscription_id: str
@@ -44,7 +53,12 @@ class TransientSendError(RuntimeError):
 
 
 class NotificationSender(Protocol):
+    """Delivers notifications to users (email, push, ...)."""
+
     async def send(self, message: OutgoingNotification) -> None:
-        """Deliver to the user. Raise `PermanentSendError` for non-retryable failures;
-        any other exception is treated as transient and the message is redelivered."""
+        """Deliver to the user.
+
+        Raise `PermanentSendError` for non-retryable failures; any other exception is
+        treated as transient and the message is redelivered.
+        """
         ...

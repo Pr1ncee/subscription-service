@@ -29,7 +29,7 @@ async def test_worker_publishes_recorded_payment(
     worker = asyncio.create_task(run_worker(settings, stop))
     try:
         async with asyncio.timeout(15):
-            while not await _published(psvc, pay):  # noqa: ASYNC110 - polls DB state
+            while not await _published(psvc, pay):  # noqa: ASYNC110
                 await asyncio.sleep(0.05)
     finally:
         stop.set()
@@ -42,7 +42,9 @@ async def test_worker_publishes_recorded_payment(
 
 
 async def test_worker_exits_when_broker_unreachable(pg_url: str) -> None:
+    """An unreachable broker at startup fails fast with ConnectionError instead of
+    hanging until `wait_for` times out.
+    """
     settings = Settings(database_url=pg_url, rabbitmq_url=UNREACHABLE_BROKER)
-    # ConnectionError (not TimeoutError): fail fast instead of hanging until wait_for fires.
     with pytest.raises(ConnectionError):
         await asyncio.wait_for(run_worker(settings, asyncio.Event()), 30)

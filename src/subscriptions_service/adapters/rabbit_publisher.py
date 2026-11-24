@@ -21,9 +21,12 @@ class RabbitPublisher:
         self._timeout_s = timeout_s
 
     async def publish(self, envelope: EventEnvelope) -> None:
+        """Publish the envelope to the events exchange, routed by its event type.
+
+        The outer timeout also bounds the wait for a reconnecting channel, which the
+        confirm timeout passed to the broker does not cover.
+        """
         try:
-            # The outer timeout also bounds the wait for a reconnecting channel,
-            # which the confirm timeout passed to the broker does not cover.
             async with asyncio.timeout(self._timeout_s):
                 await self._broker.publish(
                     envelope.to_json(),

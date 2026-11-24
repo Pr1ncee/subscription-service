@@ -96,7 +96,7 @@ async def test_post_payment_201_200_409(api_client: httpx.AsyncClient) -> None:
 async def test_post_payment_succeeds_with_broker_unreachable(
     api_client: httpx.AsyncClient,
 ) -> None:
-    # The client's settings point RabbitMQ at a closed port; the API never talks to it.
+    """The client's settings point RabbitMQ at a closed port; the API never talks to it."""
     await _put_s1(api_client)
     assert (await api_client.post("/payments", json=PAY)).status_code == 201
 

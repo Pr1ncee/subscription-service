@@ -2,6 +2,8 @@ from enum import StrEnum
 
 
 class NotificationStatus(StrEnum):
+    """Lifecycle of a notification: scheduled → queued → sent, cancelled or failed."""
+
     SCHEDULED = "scheduled"
     QUEUED = "queued"
     SENT = "sent"
@@ -10,11 +12,15 @@ class NotificationStatus(StrEnum):
 
 
 class PaymentStatus(StrEnum):
+    """Result of a payment as reported by the provider."""
+
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 
 
 class NotificationEvent(StrEnum):
+    """What a notification tells the user."""
+
     SUBSCRIPTION_EXPIRING = "subscription.expiring"
     SUBSCRIPTION_EXPIRED = "subscription.expired"
     PAYMENT_SUCCEEDED = "payment.succeeded"
@@ -22,6 +28,8 @@ class NotificationEvent(StrEnum):
 
 
 class EventType(StrEnum):
+    """Routing key of an event published to the events exchange."""
+
     PAYMENT_SUCCEEDED = "payment.succeeded"
     PAYMENT_FAILED = "payment.failed"
     NOTIFICATION_DUE = "notification.due"

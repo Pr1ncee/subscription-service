@@ -21,6 +21,9 @@ async def test_run_periodic_survives_step_exception() -> None:
 
 
 async def test_run_periodic_repeats_immediately_while_work_remains() -> None:
+    """While a step reports work it runs again at once: the long interval (10 s)
+    proves the first two calls did not sleep.
+    """
     results = iter([5, 5, 0])
     calls = 0
     stop = asyncio.Event()
@@ -33,7 +36,6 @@ async def test_run_periodic_repeats_immediately_while_work_remains() -> None:
             stop.set()
         return result
 
-    # A long interval proves the first two calls did not sleep.
     await asyncio.wait_for(run_periodic(step, interval_s=10, name="t", stop=stop), 1)
     assert calls == 3
 

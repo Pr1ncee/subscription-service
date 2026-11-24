@@ -20,6 +20,8 @@ from subscriptions_service.services.utils import (
 
 
 class PaymentService:
+    """Records payments with their outbox event and reports their delivery state."""
+
     def __init__(self, uow_factory: UnitOfWorkFactory, clock: Clock) -> None:
         self._uow_factory = uow_factory
         self._clock = clock
@@ -52,7 +54,7 @@ class PaymentService:
             )
             if inserted is None:
                 existing = await uow.payments.get_by_provider(cmd.provider_payment)
-                if existing is None:  # pragma: no cover - conflict implies the row exists
+                if existing is None:  # pragma: no cover
                     raise ConflictError(f"payment {cmd.provider_payment!r} is being recorded")
                 if not is_identical_payment(existing, cmd):
                     raise ConflictError(
@@ -74,6 +76,7 @@ class PaymentService:
         return RecordPaymentResult(view=view, created=True)
 
     async def get_status(self, payment_id: uuid.UUID) -> PaymentStatusView:
+        """The payment with its event and notification state; `NotFoundError` if unknown."""
         async with self._uow_factory() as uow:
             payment = await uow.payments.get(payment_id)
             if payment is None:
@@ -81,6 +84,7 @@ class PaymentService:
             return await payment_status_view(uow, payment)
 
     async def get_status_by_provider(self, provider_payment: str) -> PaymentStatusView:
+        """Same as `get_status`, looked up by the provider's payment id."""
         async with self._uow_factory() as uow:
             payment = await uow.payments.get_by_provider(provider_payment)
             if payment is None:

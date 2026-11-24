@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 @router.get("/live")
 async def live() -> dict[str, str]:
+    """Alive when the process answers HTTP."""
     return {"status": "ok"}
 
 

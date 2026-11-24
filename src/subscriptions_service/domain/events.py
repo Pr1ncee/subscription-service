@@ -15,6 +15,11 @@ class InvalidEnvelopeError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class EventEnvelope:
+    """An event as stored in the outbox and published to RabbitMQ.
+
+    `event_id` stays the same across republishes, so consumers can deduplicate on it.
+    """
+
     event_id: UUID
     event_type: EventType
     occurred_at: datetime
@@ -24,9 +29,11 @@ class EventEnvelope:
     def new(
         cls, event_type: EventType, payload: Mapping[str, Any], occurred_at: datetime
     ) -> "EventEnvelope":
+        """A new envelope with a fresh `event_id`."""
         return cls(uuid.uuid4(), event_type, occurred_at, payload)
 
     def to_json(self) -> bytes:
+        """Serialize to the JSON wire format."""
         return json.dumps(
             {
                 "event_id": str(self.event_id),
@@ -38,6 +45,7 @@ class EventEnvelope:
 
     @classmethod
     def from_json(cls, data: bytes) -> "EventEnvelope":
+        """Parse the JSON wire format; any malformed body raises `InvalidEnvelopeError`."""
         try:
             raw = json.loads(data)
             if not isinstance(raw, dict):

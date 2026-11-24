@@ -15,6 +15,19 @@ Implementation plans: `docs/superpowers/plans/`.
   Side effects enter services through `Protocol` ports in `services/ports.py`.
 - **ORM rows never leave `services`.** Services return frozen dataclass DTOs; the API maps them to Pydantic schemas.
 
+## Code conventions
+
+- **Limits and tunings live in `config.py`:** deployment settings in `Settings` (env), fixed limits and
+  timings (body size, id length, patterns, expiry years, consumer prefetch and retry delays) as
+  documented `Final` constants. Only `api`, `worker` and `consumers` read them; inner layers take values
+  as arguments.
+- **Helpers live in the package's `utils.py`** (`api/`, `services/`, `consumers/`, `db/`, `worker/`),
+  not as private functions inside feature modules. Enums live in an `enums.py` (`domain/enums.py`,
+  `consumers/enums.py`).
+- **No `#` comments.** Explain the "why" in docstrings (module, class, function; attribute docstrings
+  for constants). Bare tool directives (`# noqa: …`, `# type: ignore[…]`, `# pragma: no cover`) are
+  the only exception. ruff `D101`–`D103` requires docstrings on public classes, methods and functions.
+
 ## Delivery-guarantee rules
 
 - **Outbox rule:** never publish to the broker from `api` or `services`. A new event is written with
