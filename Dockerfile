@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ---- builder: resolve dependencies into /app/.venv ---------------------------------
-FROM python:3.12.15-slim-bookworm AS builder
+FROM python:3.15.1-slim-bookworm AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.9.13 /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -19,7 +19,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 # ---- runtime: no build tools, no dev dependencies, non-root -------------------------
-FROM python:3.12.15-slim-bookworm AS runtime
+FROM python:3.15.1-slim-bookworm AS runtime
 RUN groupadd --system --gid 1001 app \
     && useradd --system --uid 1001 --gid 1001 --no-create-home app
 WORKDIR /app
