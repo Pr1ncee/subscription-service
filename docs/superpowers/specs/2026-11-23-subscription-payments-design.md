@@ -2,7 +2,7 @@
 
 Date: 2026-11-23
 Status: Reviewed (builder check done), awaiting requester approval
-Source task: `senior-python-developer-task (2).md` (repo root)
+Source task: [`docs/task.md`](../../task.md)
 
 ## 1. Intent
 

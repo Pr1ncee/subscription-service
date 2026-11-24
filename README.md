@@ -78,7 +78,7 @@ before the commit sends it again. Subscription extension and notification creati
 
 ## Design decisions
 
-The full design is in [`docs/superpowers/specs/2026-11-23-subscription-payments-design.md`](docs/superpowers/specs/2026-11-23-subscription-payments-design.md).
+Original assignment (in Russian): [`docs/task.md`](docs/task.md). The full design is in [`docs/superpowers/specs/2026-11-23-subscription-payments-design.md`](docs/superpowers/specs/2026-11-23-subscription-payments-design.md).
 Domain calls made by the requester:
 
 - `day_count` is the billing period. A successful payment extends the subscription by the period
