@@ -188,8 +188,10 @@ the repo:
 3. **Execution** — each task RED → GREEN; every deviation from a plan was recorded as a ruling; each
    plan ended with an independent whole-branch review whose Critical/Important findings were fixed
    test-first.
-4. **Agent rules** — [`CLAUDE.md`](CLAUDE.md) (layering, outbox/inbox rules, commands, CI) and skills
-   in [`.claude/skills/`](.claude/skills/): `clean-architecture` and `outbox-checklist`.
+4. **Agent rules and skills** — [`CLAUDE.md`](CLAUDE.md) (layering, outbox/inbox rules, commands, CI)
+   and every skill used during development in [`.claude/skills/`](.claude/skills/) — see its
+   [index](.claude/skills/README.md) for what each was used for. Two are specific to this repo:
+   `clean-architecture` and `outbox-checklist`.
 
 ## Non-goals and future work
 
