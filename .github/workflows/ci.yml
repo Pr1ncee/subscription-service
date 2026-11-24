@@ -40,7 +40,7 @@ jobs:
       - run: uv sync --frozen
       - name: Run all tests (e2e skips itself without a stack; coverage floor via fail_under)
         run: uv run pytest -m "slow or not slow" --cov --cov-report=xml --junitxml=junit.xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: test-reports
